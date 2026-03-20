@@ -1,0 +1,34 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Jupyter cache
+.ipynb_checkpoints/
+
+# OS files
+.DS_Store
+
+# Logs
+logs/
+*.out
+*.err
+*.log
+
+# Big generated outputs
+outputs_v7/
+
+# Data (raw / large)
+data/
+
+# Common model artifacts
+checkpoints/
+*.pt
+*.pth
+*.bin
+*.ckpt
+*.safetensors
+*.npz
+
+# Caches
+.cache/
+wandb/
