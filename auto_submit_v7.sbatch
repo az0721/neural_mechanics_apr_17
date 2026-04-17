@@ -17,7 +17,7 @@
 set -uo pipefail
 
 PROJECT=/scratch/zhang.yicheng/llm_ft/neural_mechanics_v7
-PER_USER="${PROJECT}/outputs_v7/per_user"
+PER_USER="${PROJECT}/outputs_v8/per_user"
 SB="${PROJECT}/scripts/user_jobs"
 ME=$(whoami)
 INTERVAL=90

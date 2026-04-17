@@ -1,0 +1,410 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+Analyze NL-based steering results v2 (Apr 4 revision).
+
+PDF structure:
+  Section 1: Layer Performance Matrix (first pages)
+  Section 2: Cross-Iteration Hint Direction (V8 - V7)
+  Section 3: Per-Prompt Detail (difference heatmap + pine tree + histogram)
+
+Output: steering/output/nl_steering_{exp}.pdf
+
+Usage:
+    python steering/analyze_steering_nl.py
+    python steering/analyze_steering_nl.py --exp exp2
+"""
+import json, os, sys, glob, argparse, textwrap
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.colors import TwoSlopeNorm
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from config import config_label
+from steering.prompts_nl import ALL_QUESTIONS, MCQ_TOKENS, DIGIT_TOKENS
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUT_DIR = os.path.join(BASE_DIR, 'steering', 'output')
+os.makedirs(OUT_DIR, exist_ok=True)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Data Loading
+# ══════════════════════════════════════════════════════════════════════
+
+def load_iter(iter_name):
+    nl_dir = os.path.join(BASE_DIR, f'outputs_{iter_name}', 'steering', 'nl_results')
+    if not os.path.exists(nl_dir):
+        return {}
+    data = {}
+    for f in sorted(glob.glob(os.path.join(nl_dir, '*_nl.json'))):
+        with open(f) as fh:
+            d = json.load(fh)
+        m = d['meta']
+        data[(m['exp'], m['cfg'])] = d
+        print(f"  {iter_name}/{m['exp']}/cfg{m['cfg']}: {len(d['results'])} questions")
+    return data
+
+
+def load_all():
+    print("Loading NL steering results...")
+    return {it: load_iter(it) for it in ['v7', 'v8']}
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Helpers
+# ══════════════════════════════════════════════════════════════════════
+
+def get_old_probs(qr, layer, coeff, token):
+    for e in qr['old_method']:
+        if e['layer'] == layer and e['coeff'] == coeff:
+            return e['probs'].get(token, 0)
+    return 0
+
+def get_new_probs(qr, layer, cond, token):
+    for e in qr['new_method']:
+        if e['layer'] == layer:
+            return e[cond].get(token, 0)
+    return 0
+
+def expected_digit(probs_dict):
+    return sum(int(d) * probs_dict.get(d, 0) for d in DIGIT_TOKENS)
+
+def pct_change(steered, neutral):
+    if abs(neutral) < 1e-10:
+        return 0.0
+    return (steered - neutral) / neutral
+
+def add_prompt_box(fig, prompt_str):
+    wrapped = textwrap.fill(prompt_str.replace('\n', ' | '), width=65)
+    fig.text(0.99, 0.99, wrapped, transform=fig.transFigure,
+             fontsize=5, va='top', ha='right', fontfamily='monospace',
+             bbox=dict(boxstyle='round,pad=0.3', fc='#f5f5f5', ec='#cccccc',
+                       alpha=0.9))
+
+def steering_eff_mcq(qr, q, layer, coeff):
+    tgt = q.get('target_option_pos')
+    if not tgt: return 0
+    return get_old_probs(qr, layer, coeff, tgt) - get_old_probs(qr, layer, 0, tgt)
+
+def steering_eff_num(qr, layer, coeff):
+    e_s = expected_digit({d: get_old_probs(qr, layer, coeff, d) for d in DIGIT_TOKENS})
+    e_n = expected_digit({d: get_old_probs(qr, layer, 0, d) for d in DIGIT_TOKENS})
+    return e_s - e_n
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Section 1: Layer Performance Matrix
+# ══════════════════════════════════════════════════════════════════════
+
+def compute_layer_effectiveness(run_data, n_layers):
+    effects = np.zeros(n_layers)
+    counts = np.zeros(n_layers)
+    for qr in run_data['results']:
+        q = qr['question']
+        for layer in range(n_layers):
+            if q['type'] == 'mcq':
+                e = (abs(steering_eff_mcq(qr, q, layer, 10)) +
+                     abs(steering_eff_mcq(qr, q, layer, -10))) / 2
+            else:
+                e = (abs(steering_eff_num(qr, layer, 10)) +
+                     abs(steering_eff_num(qr, layer, -10))) / 2
+            effects[layer] += e
+            counts[layer] += 1
+    return effects / np.maximum(counts, 1)
+
+
+def pg_layer_matrix(pdf, all_data, exp):
+    combos = []
+    for it in ['v7', 'v8']:
+        for key, run in all_data[it].items():
+            if key[0] == exp:
+                combos.append((it, key[1], run))
+    if not combos:
+        return []
+
+    n_layers = combos[0][2]['meta']['n_decoder_layers']
+    fig, axes = plt.subplots(len(combos), 1,
+                              figsize=(16, 3 * len(combos) + 2), squeeze=False)
+    top_all = set()
+
+    for idx, (it, cfg, run) in enumerate(combos):
+        ax = axes[idx, 0]
+        eff = compute_layer_effectiveness(run, n_layers)
+        top5 = np.argsort(eff)[-5:][::-1]
+        top_all.update(top5.tolist())
+
+        ax.bar(range(n_layers), eff,
+               color='#2196F3' if it == 'v7' else '#FF5722',
+               alpha=0.7, edgecolor='black', lw=0.3)
+        for l in top5:
+            ax.bar(l, eff[l], color='gold', edgecolor='black', lw=0.8)
+            ax.text(l, eff[l] + 0.002, f'L{l}', ha='center', fontsize=6,
+                    fontweight='bold')
+        ax.set_ylabel('Mean |ΔP|')
+        ax.set_title(f'{it.upper()} cfg{cfg} ({config_label(exp, cfg)})',
+                     fontweight='bold', fontsize=10)
+        ax.grid(True, alpha=0.1, axis='y')
+        ax.set_xlim(-0.5, n_layers - 0.5)
+
+    axes[-1, 0].set_xlabel('Layer')
+    fig.suptitle(f'{exp.upper()} — Layer Steering Effectiveness\n'
+                 f'(mean |ΔP(target)| across all questions, old method ±10)',
+                 fontsize=13, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.94])
+    pdf.savefig(fig, dpi=150); plt.close()
+    return sorted(top_all)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Section 2: Cross-Iteration Hint Direction (V8 - V7)
+# ══════════════════════════════════════════════════════════════════════
+
+def pg_hint_direction(pdf, all_data, exp, top_layers):
+    v7, v8 = all_data['v7'], all_data['v8']
+    common = [k for k in v7 if k in v8 and k[0] == exp]
+    if not common or not top_layers:
+        return
+
+    n_layers = v7[common[0]]['meta']['n_decoder_layers']
+
+    fig, axes = plt.subplots(len(common), 1,
+                              figsize=(16, 5 * len(common)), squeeze=False)
+
+    for ki, key in enumerate(sorted(common)):
+        ax = axes[ki, 0]
+        delta = np.zeros(n_layers)
+        n_q = 0
+        for qi, qr7 in enumerate(v7[key]['results']):
+            if qi >= len(v8[key]['results']): break
+            qr8 = v8[key]['results'][qi]
+            q = qr7['question']
+            n_q += 1
+            for l in range(n_layers):
+                if q['type'] == 'mcq':
+                    e7 = abs(steering_eff_mcq(qr7, q, l, 10))
+                    e8 = abs(steering_eff_mcq(qr8, q, l, 10))
+                else:
+                    e7 = abs(steering_eff_num(qr7, l, 10))
+                    e8 = abs(steering_eff_num(qr8, l, 10))
+                delta[l] += (e8 - e7)
+        delta /= max(n_q, 1)
+
+        colors = ['#4CAF50' if d > 0 else '#FF5722' for d in delta]
+        ax.bar(range(n_layers), delta, color=colors, alpha=0.7,
+               edgecolor='black', lw=0.3)
+        ax.axhline(0, color='black', lw=0.8)
+        for l in top_layers:
+            if l < n_layers:
+                ax.axvline(l, color='gray', ls=':', alpha=0.4)
+        ax.set_ylabel('Δ|effect| (V8 − V7)')
+        ax.set_title(f'cfg{key[1]} — green=V8 stronger, red=V7 stronger',
+                     fontweight='bold')
+        ax.grid(True, alpha=0.1, axis='y')
+
+    axes[-1, 0].set_xlabel('Layer')
+    fig.suptitle(f'{exp.upper()} — Hint Direction: V8 (hint) − V7 (no hint)',
+                 fontsize=13, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.93])
+    pdf.savefig(fig, dpi=150); plt.close()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Section 3: Per-Prompt Detail Pages
+# ══════════════════════════════════════════════════════════════════════
+
+def pg_prompt_detail(pdf, qr, q, meta, top_layers):
+    it, cfg = meta['iter'], meta['cfg']
+    n_layers = meta['n_decoder_layers']
+    coeffs = meta['old_coeffs']
+    layers = np.arange(n_layers)
+    is_mcq = q['type'] == 'mcq'
+    tokens = MCQ_TOKENS if is_mcq else DIGIT_TOKENS
+
+    fig = plt.figure(figsize=(20, 14))
+    ax_heat = fig.add_axes([0.05, 0.42, 0.55, 0.48])
+    ax_pine = fig.add_axes([0.65, 0.42, 0.30, 0.48])
+    ax_hist = fig.add_axes([0.05, 0.06, 0.90, 0.30])
+
+    # ── Neutral baseline ──
+    neutral = {t: np.array([get_old_probs(qr, l, 0, t) for l in range(n_layers)])
+               for t in tokens}
+
+    # ── Difference Heatmap ──
+    if is_mcq:
+        tgt = q.get('target_option_pos', 'C')
+        mat = np.zeros((n_layers, len(coeffs)))
+        for ci, c in enumerate(coeffs):
+            for li in range(n_layers):
+                p_s = get_old_probs(qr, li, c, tgt)
+                mat[li, ci] = pct_change(p_s, neutral[tgt][li])
+        title_heat = f'ΔP({tgt})/P({tgt})₀  [blue=↓ red=↑]'
+        cbar_label = '% change'
+    else:
+        mat = np.zeros((n_layers, len(coeffs)))
+        for ci, c in enumerate(coeffs):
+            for li in range(n_layers):
+                e_s = expected_digit({d: get_old_probs(qr, li, c, d) for d in tokens})
+                e_n = expected_digit({d: neutral[d][li] for d in tokens})
+                mat[li, ci] = e_s - e_n
+        title_heat = 'ΔE[digit]  [blue=lower red=higher]'
+        cbar_label = 'Δ digit'
+
+    vmax = max(abs(mat.min()), abs(mat.max()), 0.01)
+    norm = TwoSlopeNorm(vmin=-vmax, vcenter=0, vmax=vmax)
+    im = ax_heat.imshow(mat, aspect='auto', origin='lower', cmap='RdBu_r', norm=norm)
+    ax_heat.set_xticks(range(len(coeffs)))
+    ax_heat.set_xticklabels([str(c) for c in coeffs], fontsize=8)
+    ax_heat.set_xlabel('Coefficient'); ax_heat.set_ylabel('Layer')
+    ax_heat.set_title(title_heat, fontweight='bold', fontsize=9)
+    for l in top_layers:
+        if l < n_layers:
+            ax_heat.axhline(l, color='lime', ls='--', lw=0.8, alpha=0.6)
+    plt.colorbar(im, ax=ax_heat, shrink=0.7, label=cbar_label)
+
+    # ── Pine Tree Plot ──
+    neg_c, pos_c = min(coeffs), max(coeffs)
+
+    if is_mcq:
+        tgt = q.get('target_option_pos', 'C')
+        d_neg = [pct_change(get_old_probs(qr, l, neg_c, tgt), neutral[tgt][l])
+                 for l in range(n_layers)]
+        d_pos = [pct_change(get_old_probs(qr, l, pos_c, tgt), neutral[tgt][l])
+                 for l in range(n_layers)]
+        d_emp = [pct_change(get_new_probs(qr, l, 'employed', tgt), neutral[tgt][l])
+                 for l in range(n_layers)]
+        d_unemp = [pct_change(get_new_probs(qr, l, 'unemployed', tgt), neutral[tgt][l])
+                   for l in range(n_layers)]
+        xl = f'% change P({tgt})'
+    else:
+        e_n = [expected_digit({d: neutral[d][l] for d in tokens}) for l in range(n_layers)]
+        d_neg = [expected_digit({d: get_old_probs(qr, l, neg_c, d) for d in tokens}) - e_n[l]
+                 for l in range(n_layers)]
+        d_pos = [expected_digit({d: get_old_probs(qr, l, pos_c, d) for d in tokens}) - e_n[l]
+                 for l in range(n_layers)]
+        d_emp = [expected_digit({d: get_new_probs(qr, l, 'employed', d) for d in tokens}) - e_n[l]
+                 for l in range(n_layers)]
+        d_unemp = [expected_digit({d: get_new_probs(qr, l, 'unemployed', d) for d in tokens}) - e_n[l]
+                   for l in range(n_layers)]
+        xl = 'Δ E[digit]'
+
+    ax_pine.plot(d_neg, layers, 'b-', lw=1.5, alpha=0.7, label=f'Old c={neg_c}')
+    ax_pine.plot(d_pos, layers, 'r-', lw=1.5, alpha=0.7, label=f'Old c={pos_c}')
+    ax_pine.plot(d_emp, layers, 'r--', lw=1.2, alpha=0.5, label='New +V_emp')
+    ax_pine.plot(d_unemp, layers, 'b--', lw=1.2, alpha=0.5, label='New +V_unemp')
+    ax_pine.axvline(0, color='black', lw=0.8)
+    for l in top_layers:
+        if l < n_layers:
+            ax_pine.axhline(l, color='gray', ls=':', alpha=0.4)
+    ax_pine.set_xlabel(xl); ax_pine.set_ylabel('Layer')
+    ax_pine.set_title('Pine Tree: effect per layer', fontweight='bold', fontsize=9)
+    ax_pine.legend(fontsize=6, loc='lower right')
+    ax_pine.grid(True, alpha=0.1)
+
+    # ── Histogram at top layers ──
+    show_layers = sorted([l for l in top_layers if l < n_layers])[:5] or [26]
+    x_base = np.arange(len(show_layers))
+
+    conds = [
+        ('Neutral', 0, '#90CAF9'),
+        (f'c={neg_c}', neg_c, '#1565C0'),
+        (f'c={pos_c}', pos_c, '#C62828'),
+        ('New emp', 'emp', '#4CAF50'),
+        ('New unemp', 'unemp', '#FF9800'),
+    ]
+
+    if is_mcq:
+        bar_w = 0.12
+        for ci, (label, cond, color) in enumerate(conds):
+            for ti, tok in enumerate(MCQ_TOKENS):
+                vals = []
+                for l in show_layers:
+                    v = get_old_probs(qr, l, cond, tok) if isinstance(cond, int) \
+                        else get_new_probs(qr, l, cond, tok)
+                    vals.append(v)
+                n_grp = len(conds) * len(MCQ_TOKENS)
+                offset = (ci * len(MCQ_TOKENS) + ti - n_grp / 2 + 0.5) * bar_w
+                hatch = ['', '///', '\\\\\\'][ti]
+                lbl = f'{label} P({tok})' if (ci == 0 and ti == 0) or ti == 0 else ''
+                ax_hist.bar(x_base + offset, vals, bar_w, color=color,
+                            hatch=hatch, edgecolor='black', lw=0.3,
+                            alpha=0.8, label=lbl if lbl else '_nolegend_')
+        ax_hist.set_ylabel('P(option)')
+        ax_hist.legend(fontsize=5, ncol=5, loc='upper right')
+    else:
+        bar_w = 0.13
+        for ci, (label, cond, color) in enumerate(conds):
+            vals = []
+            for l in show_layers:
+                v = expected_digit({d: get_old_probs(qr, l, cond, d) for d in tokens}) \
+                    if isinstance(cond, int) else \
+                    expected_digit({d: get_new_probs(qr, l, cond, d) for d in tokens})
+                vals.append(v)
+            offset = (ci - len(conds) / 2 + 0.5) * bar_w
+            ax_hist.bar(x_base + offset, vals, bar_w, color=color,
+                        edgecolor='black', lw=0.5, alpha=0.85, label=label)
+            for xi, v in enumerate(vals):
+                ax_hist.text(xi + offset, v + 0.05, f'{v:.1f}', ha='center', fontsize=6)
+        ax_hist.set_ylabel('E[digit]')
+        ax_hist.legend(fontsize=7)
+
+    ax_hist.set_xticks(x_base)
+    ax_hist.set_xticklabels([f'L{l}' for l in show_layers], fontsize=9)
+    ax_hist.set_xlabel('Layer')
+    ax_hist.set_title('Distribution at top layers', fontweight='bold', fontsize=9)
+    ax_hist.grid(True, alpha=0.1, axis='y')
+
+    add_prompt_box(fig, q['prompt'])
+    fig.suptitle(f'{q["id"]}: {q["description"]} | {it.upper()}/cfg{cfg}',
+                 fontsize=12, fontweight='bold', y=0.98)
+    pdf.savefig(fig, dpi=150); plt.close()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Main
+# ══════════════════════════════════════════════════════════════════════
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--exp', nargs='+', default=['exp2', 'exp1a'])
+    args = parser.parse_args()
+
+    all_data = load_all()
+
+    for exp in args.exp:
+        questions = ALL_QUESTIONS.get(exp, [])
+        if not questions:
+            continue
+
+        pdf_path = os.path.join(OUT_DIR, f'nl_steering_{exp}.pdf')
+        print(f"\nGenerating: {pdf_path}")
+
+        with PdfPages(pdf_path) as pdf:
+            print(f"  Section 1: Layer performance matrix")
+            top_layers = pg_layer_matrix(pdf, all_data, exp)
+            if not top_layers:
+                top_layers = [26, 33]
+            print(f"    Top layers: {top_layers}")
+
+            print(f"  Section 2: Cross-iteration hint direction")
+            pg_hint_direction(pdf, all_data, exp, top_layers)
+
+            print(f"  Section 3: Per-prompt detail")
+            for it in ['v7', 'v8']:
+                for key, run in sorted(all_data[it].items()):
+                    if key[0] != exp: continue
+                    meta = run['meta']
+                    meta['iter'] = it
+                    for qr in run['results']:
+                        q = qr['question']
+                        print(f"    {it}/cfg{key[1]} {q['id']}")
+                        pg_prompt_detail(pdf, qr, q, meta, top_layers)
+
+        print(f"  Done! → {pdf_path}")
+
+
+if __name__ == "__main__":
+    main()

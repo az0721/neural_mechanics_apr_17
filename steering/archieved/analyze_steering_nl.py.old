@@ -1,0 +1,354 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+Analyze NL-based steering results — v3.
+
+One PDF per iteration. All probabilities renormalized over candidates.
+
+Per (exp, cfg, question):
+  Old method → heatmap: X=coefficients, Y=layers, color=P_renorm
+  New method → heatmap: X=conditions (neutral/+V_pos/+V_neg), Y=layers, color=P_renorm
+
+Every page shows the full prompt text.
+
+Usage:
+    python steering/analyze_steering_nl.py              # both v7 and v8
+    python steering/analyze_steering_nl.py --iter v7    # one only
+"""
+import json, os, sys, glob, argparse, textwrap
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from config import OUTPUT_DIR
+from steering.prompts_nl import ALL_QUESTIONS, MCQ_TOKENS, DIGIT_TOKENS
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RESULTS_DIR = os.path.join(OUTPUT_DIR, 'steering', 'results')
+os.makedirs(RESULTS_DIR, exist_ok=True)
+
+NEW_COND_KEYS = ['neutral', 'employed', 'unemployed']
+NEW_COND_LABELS = {
+    'exp2':  {'neutral': 'Neutral', 'employed': '+V_emp', 'unemployed': '+V_unemp'},
+    'exp1a': {'neutral': 'Neutral', 'employed': '+V_wkday', 'unemployed': '+V_wkend'},
+}
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Data Loading
+# ══════════════════════════════════════════════════════════════════════
+
+def load_iter(iter_name):
+    nl_dir = os.path.join(BASE_DIR, f'outputs_{iter_name}', 'steering', 'nl_results')
+    if not os.path.exists(nl_dir):
+        return {}
+    data = {}
+    for f in sorted(glob.glob(os.path.join(nl_dir, '*_nl.json'))):
+        with open(f) as fh:
+            d = json.load(fh)
+        m = d['meta']
+        data[(m['exp'], m['cfg'])] = d
+        print(f"  Loaded: {iter_name}/{m['exp']}/cfg{m['cfg']} "
+              f"({len(d['results'])} questions)")
+    return data
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Helpers
+# ══════════════════════════════════════════════════════════════════════
+
+def get_old_probs(qr, layer, coeff, token):
+    for e in qr['old_method']:
+        if e['layer'] == layer and e['coeff'] == coeff:
+            return e['probs'].get(token, 0)
+    return 0
+
+def get_new_probs(qr, layer, cond, token):
+    for e in qr['new_method']:
+        if e['layer'] == layer:
+            return e[cond].get(token, 0)
+    return 0
+
+def renorm(probs_dict, tokens):
+    vals = [probs_dict.get(t, 0) for t in tokens]
+    total = sum(vals)
+    if total < 1e-15:
+        return {t: 1.0 / len(tokens) for t in tokens}
+    return {t: v / total for t, v in zip(tokens, vals)}
+
+def expected_digit(probs_dict):
+    return sum(int(d) * probs_dict.get(d, 0) for d in DIGIT_TOKENS)
+
+def add_prompt_box(fig, prompt_str):
+    wrapped = textwrap.fill(prompt_str.replace('\n', ' | '), width=70)
+    fig.text(0.99, 0.99, wrapped, transform=fig.transFigure,
+             fontsize=5, va='top', ha='right', fontfamily='monospace',
+             bbox=dict(boxstyle='round,pad=0.3', fc='#f5f5f5', ec='#cccccc',
+                       alpha=0.9))
+
+def page_label(q, meta):
+    return f'{q["id"]}: {q["description"]} | {meta["iter"]}/{meta["exp"]}/cfg{meta["cfg"]}'
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Old Method Heatmaps (MCQ: 3 panels, Numeric: E[digit] + key digits)
+# ══════════════════════════════════════════════════════════════════════
+
+def pg_old_mcq(pdf, qr, q, meta):
+    coeffs = meta['old_coeffs']
+    n_layers = meta['n_decoder_layers']
+    tokens = MCQ_TOKENS
+
+    mats = {}
+    for tok in tokens:
+        mat = np.zeros((n_layers, len(coeffs)))
+        for li in range(n_layers):
+            raw = {t: get_old_probs(qr, li, coeffs[ci], t)
+                   for ci in range(len(coeffs)) for t in tokens}
+            for ci, c in enumerate(coeffs):
+                raw_c = {t: get_old_probs(qr, li, c, t) for t in tokens}
+                rn = renorm(raw_c, tokens)
+                mat[li, ci] = rn[tok]
+        mats[tok] = mat
+
+    fig, axes = plt.subplots(1, len(tokens), figsize=(5.5 * len(tokens), 7),
+                              squeeze=False)
+    for ti, tok in enumerate(tokens):
+        ax = axes[0, ti]
+        im = ax.imshow(mats[tok], aspect='auto', origin='lower', cmap='YlOrRd',
+                        vmin=0, vmax=1)
+        ax.set_xticks(range(len(coeffs)))
+        ax.set_xticklabels([str(c) for c in coeffs], fontsize=8)
+        ax.set_xlabel('Coefficient', fontsize=9)
+        ax.set_ylabel('Layer', fontsize=9)
+        ax.set_yticks(range(0, n_layers, 6))
+        suffix = ''
+        if tok == q.get('target_option_pos'): suffix = ' [+]'
+        elif tok == q.get('target_option_neg'): suffix = ' [-]'
+        ax.set_title(f'P({tok}){suffix}', fontweight='bold', fontsize=11)
+        plt.colorbar(im, ax=ax, shrink=0.75)
+
+    fig.suptitle(f'Old Method — {page_label(q, meta)}',
+                 fontsize=10, fontweight='bold')
+    add_prompt_box(fig, q['prompt'])
+    plt.tight_layout(rect=[0, 0, 0.96, 0.88])
+    pdf.savefig(fig, dpi=150); plt.close()
+
+
+def pg_old_numeric(pdf, qr, q, meta):
+    coeffs = meta['old_coeffs']
+    n_layers = meta['n_decoder_layers']
+
+    mat_ev = np.zeros((n_layers, len(coeffs)))
+    for li in range(n_layers):
+        for ci, c in enumerate(coeffs):
+            raw = {d: get_old_probs(qr, li, c, d) for d in DIGIT_TOKENS}
+            rn = renorm(raw, DIGIT_TOKENS)
+            mat_ev[li, ci] = expected_digit(rn)
+
+    fig, ax = plt.subplots(1, 1, figsize=(8, 7))
+    im = ax.imshow(mat_ev, aspect='auto', origin='lower', cmap='viridis',
+                    vmin=0, vmax=9)
+    ax.set_xticks(range(len(coeffs)))
+    ax.set_xticklabels([str(c) for c in coeffs], fontsize=9)
+    ax.set_xlabel('Coefficient', fontsize=10)
+    ax.set_ylabel('Layer', fontsize=10)
+    ax.set_yticks(range(0, n_layers, 6))
+    ax.set_title('E[digit] (renormalized over 0-9)', fontweight='bold')
+    plt.colorbar(im, ax=ax, shrink=0.75)
+
+    fig.suptitle(f'Old Method — {page_label(q, meta)}',
+                 fontsize=10, fontweight='bold')
+    add_prompt_box(fig, q['prompt'])
+    plt.tight_layout(rect=[0, 0, 0.96, 0.88])
+    pdf.savefig(fig, dpi=150); plt.close()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# New Method Heatmaps (MCQ: 3 panels, Numeric: E[digit])
+# ══════════════════════════════════════════════════════════════════════
+
+def pg_new_mcq(pdf, qr, q, meta):
+    n_layers = meta['n_decoder_layers']
+    tokens = MCQ_TOKENS
+    exp = meta['exp']
+    cond_labels = [NEW_COND_LABELS[exp][c] for c in NEW_COND_KEYS]
+
+    mats = {}
+    for tok in tokens:
+        mat = np.zeros((n_layers, len(NEW_COND_KEYS)))
+        for li in range(n_layers):
+            for ci, cond in enumerate(NEW_COND_KEYS):
+                raw = {t: get_new_probs(qr, li, cond, t) for t in tokens}
+                rn = renorm(raw, tokens)
+                mat[li, ci] = rn[tok]
+        mats[tok] = mat
+
+    fig, axes = plt.subplots(1, len(tokens), figsize=(5.5 * len(tokens), 7),
+                              squeeze=False)
+    for ti, tok in enumerate(tokens):
+        ax = axes[0, ti]
+        im = ax.imshow(mats[tok], aspect='auto', origin='lower', cmap='YlOrRd',
+                        vmin=0, vmax=1)
+        ax.set_xticks(range(len(NEW_COND_KEYS)))
+        ax.set_xticklabels(cond_labels, fontsize=8, rotation=15)
+        ax.set_xlabel('Condition', fontsize=9)
+        ax.set_ylabel('Layer', fontsize=9)
+        ax.set_yticks(range(0, n_layers, 6))
+        suffix = ''
+        if tok == q.get('target_option_pos'): suffix = ' [+]'
+        elif tok == q.get('target_option_neg'): suffix = ' [-]'
+        ax.set_title(f'P({tok}){suffix}', fontweight='bold', fontsize=11)
+        plt.colorbar(im, ax=ax, shrink=0.75)
+
+    fig.suptitle(f'New Method — {page_label(q, meta)}',
+                 fontsize=10, fontweight='bold')
+    add_prompt_box(fig, q['prompt'])
+    plt.tight_layout(rect=[0, 0, 0.96, 0.88])
+    pdf.savefig(fig, dpi=150); plt.close()
+
+
+def pg_new_numeric(pdf, qr, q, meta):
+    n_layers = meta['n_decoder_layers']
+    exp = meta['exp']
+    cond_labels = [NEW_COND_LABELS[exp][c] for c in NEW_COND_KEYS]
+
+    mat_ev = np.zeros((n_layers, len(NEW_COND_KEYS)))
+    for li in range(n_layers):
+        for ci, cond in enumerate(NEW_COND_KEYS):
+            raw = {d: get_new_probs(qr, li, cond, d) for d in DIGIT_TOKENS}
+            rn = renorm(raw, DIGIT_TOKENS)
+            mat_ev[li, ci] = expected_digit(rn)
+
+    fig, ax = plt.subplots(1, 1, figsize=(8, 7))
+    im = ax.imshow(mat_ev, aspect='auto', origin='lower', cmap='viridis',
+                    vmin=0, vmax=9)
+    ax.set_xticks(range(len(NEW_COND_KEYS)))
+    ax.set_xticklabels(cond_labels, fontsize=9, rotation=15)
+    ax.set_xlabel('Condition', fontsize=10)
+    ax.set_ylabel('Layer', fontsize=10)
+    ax.set_yticks(range(0, n_layers, 6))
+    ax.set_title('E[digit] (renormalized over 0-9)', fontweight='bold')
+    plt.colorbar(im, ax=ax, shrink=0.75)
+
+    fig.suptitle(f'New Method — {page_label(q, meta)}',
+                 fontsize=10, fontweight='bold')
+    add_prompt_box(fig, q['prompt'])
+    plt.tight_layout(rect=[0, 0, 0.96, 0.88])
+    pdf.savefig(fig, dpi=150); plt.close()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Summary Table
+# ══════════════════════════════════════════════════════════════════════
+
+def pg_summary(pdf, iter_data, iter_name):
+    fig, ax = plt.subplots(figsize=(20, 14)); ax.axis('off')
+    lines = [f'NL Steering Summary — {iter_name.upper()}\n',
+             '=' * 100 + '\n\n']
+
+    lines.append(f'{"Exp/Cfg":>12s} {"Q":>4s} {"Type":>5s} '
+                 f'{"c=-10":>8s} {"c=0":>8s} {"c=+10":>8s} '
+                 f'{"Neut":>8s} {"+Pos":>8s} {"+Neg":>8s} '
+                 f'{"D(P-N)":>8s}\n')
+    lines.append('-' * 100 + '\n')
+
+    for key in sorted(iter_data.keys()):
+        d = iter_data[key]
+        meta = d['meta']
+        k_str = f"{meta['exp']}/c{meta['cfg']}"
+
+        for qr in d['results']:
+            q = qr['question']
+            l = min(25, meta['n_decoder_layers'] - 1)
+
+            if q['type'] == 'mcq':
+                tgt = q.get('target_option_pos') or 'A'
+                tokens = MCQ_TOKENS
+                def old_p(c):
+                    raw = {t: get_old_probs(qr, l, c, t) for t in tokens}
+                    return renorm(raw, tokens)[tgt]
+                def new_p(cond):
+                    raw = {t: get_new_probs(qr, l, cond, t) for t in tokens}
+                    return renorm(raw, tokens)[tgt]
+
+                vals = [old_p(-10), old_p(0), old_p(10),
+                        new_p('neutral'), new_p('employed'), new_p('unemployed')]
+                delta = vals[4] - vals[5]
+                fmt = ''.join(f'{v:>8.3f}' for v in vals) + f'{delta:>+8.3f}'
+            else:
+                def old_e(c):
+                    raw = {d_: get_old_probs(qr, l, c, d_) for d_ in DIGIT_TOKENS}
+                    return expected_digit(renorm(raw, DIGIT_TOKENS))
+                def new_e(cond):
+                    raw = {d_: get_new_probs(qr, l, cond, d_) for d_ in DIGIT_TOKENS}
+                    return expected_digit(renorm(raw, DIGIT_TOKENS))
+
+                vals = [old_e(-10), old_e(0), old_e(10),
+                        new_e('neutral'), new_e('employed'), new_e('unemployed')]
+                delta = vals[4] - vals[5]
+                fmt = ''.join(f'{v:>8.2f}' for v in vals) + f'{delta:>+8.2f}'
+
+            lines.append(f'{k_str:>12s} {q["id"]:>4s} {q["type"]:>5s} {fmt}\n')
+        lines.append('\n')
+
+    lines.append('-' * 100 + '\n')
+    lines.append('All values renormalized: MCQ over {A,B,C}, numeric over {0..9}.\n')
+    lines.append('MCQ shows P(target_option_pos). Numeric shows E[digit].\n')
+    lines.append('Values at L25. D(P-N) = +Pos minus +Neg.\n')
+
+    ax.text(0.01, 0.99, ''.join(lines), transform=ax.transAxes,
+            fontsize=7, va='top', fontfamily='monospace')
+    fig.suptitle(f'NL Steering Summary — {iter_name.upper()}',
+                 fontsize=13, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    pdf.savefig(fig, dpi=150); plt.close()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Main
+# ══════════════════════════════════════════════════════════════════════
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--iter', nargs='+', default=['v7', 'v8'],
+                        choices=['v7', 'v8'])
+    args = parser.parse_args()
+
+    for iter_name in args.iter:
+        print(f"\n{'='*60}")
+        print(f"Loading {iter_name}...")
+        iter_data = load_iter(iter_name)
+        if not iter_data:
+            print(f"  No data for {iter_name}, skipping."); continue
+
+        out_path = os.path.join(RESULTS_DIR, f'nl_steering_{iter_name}.pdf')
+        print(f"Generating: {out_path}")
+
+        with PdfPages(out_path) as pdf:
+            for key in sorted(iter_data.keys()):
+                d = iter_data[key]
+                meta = d['meta']
+                print(f"\n  {iter_name}/{meta['exp']}/cfg{meta['cfg']}:")
+
+                for qr in d['results']:
+                    q = qr['question']
+                    print(f"    {q['id']}: {q['description']}")
+                    if q['type'] == 'mcq':
+                        pg_old_mcq(pdf, qr, q, meta)
+                        pg_new_mcq(pdf, qr, q, meta)
+                    else:
+                        pg_old_numeric(pdf, qr, q, meta)
+                        pg_new_numeric(pdf, qr, q, meta)
+
+            pg_summary(pdf, iter_data, iter_name)
+        print(f"  Done -> {out_path}")
+
+    print(f"\n{'='*60}\nAll done!\n{'='*60}")
+
+
+if __name__ == "__main__":
+    main()

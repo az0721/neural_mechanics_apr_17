@@ -1,0 +1,104 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+Generate sbatch scripts for trajectory steering Phase 2c (Mar 30).
+
+Split: 1 job = 1 iter × 1 layer × 1 user × 1 cfg (both methods).
+Per job: (5 old + 3 new) × 30 reps = 240 gen × ~1.5 min/gen = ~6h.
+
+Total: 2 iters × 2 layers × 10 users × 2 cfgs = 80 jobs.
+
+Usage:
+    python steering/generate_steering_jobs_v8.py
+    python steering/generate_steering_jobs_v8.py --n-reps 5  # test
+"""
+import sys, os, argparse
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCRIPTS_DIR = os.path.join(BASE_DIR, 'scripts', 'steering_jobs_v8')
+WORK_DIR = '/scratch/zhang.yicheng/llm_ft/neural_mechanics_v7'
+
+LAYERS = [26, 33]
+ITERS = ['v7', 'v8']
+CFGS = [5, 6]
+N_USERS = 10
+
+SBATCH_TEMPLATE = """#!/bin/bash
+#SBATCH --job-name=stv8_{short}_{iter}_c{cfg}_L{layer}
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:h200:1
+#SBATCH --time=6:00:00
+#SBATCH --mem=16G
+#SBATCH --cpus-per-task=4
+#SBATCH --output=logs/stv8_{short}_{iter}_c{cfg}_L{layer}_%j.out
+#SBATCH --error=logs/stv8_{short}_{iter}_c{cfg}_L{layer}_%j.err
+
+cd {work_dir}
+source /shared/centos7/anaconda3/2022.05/etc/profile.d/conda.sh
+conda activate unsloth_env
+module purge && module load cuda/12.1.1
+export HF_HOME=/scratch/$USER/.cache/huggingface
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
+echo "$(date) | Traj Steering: {iter} cfg{cfg} L{layer} {short}"
+
+# Compute raw vectors if not exist (CPU, fast)
+python -u steering/compute_vectors_nl.py --iter {iter} --exp exp2 --cfgs {cfg}
+
+# Run steering (GPU, ~6h)
+python -u steering/run_steering_per_user_v8.py \\
+    --user {uid} --iter {iter} --layer {layer} --cfg {cfg} --n-reps {n_reps}
+
+echo "$(date) | Done"
+"""
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--n-reps', type=int, default=30)
+    parser.add_argument('--model', default='12b',
+                        choices=list(MODEL_REGISTRY.keys()),
+                        help='Model key (default: 12b)')
+    args = parser.parse_args()
+
+    os.makedirs(SCRIPTS_DIR, exist_ok=True)
+
+    user_file = os.path.join(BASE_DIR, 'steering', 'user_list_v8.txt')
+    users = []
+    with open(user_file) as f:
+        for line in f:
+            uid = line.strip().split(',')[0]
+            if uid:
+                users.append(uid)
+    users = users[:N_USERS]
+
+    n = 0
+    for iter_name in ITERS:
+        for layer in LAYERS:
+            for cfg in CFGS:
+                for uid in users:
+                    short = uid[:12]
+                    script = SBATCH_TEMPLATE.format(
+                        short=short, iter=iter_name, layer=layer,
+                        cfg=cfg, uid=uid, work_dir=WORK_DIR,
+                        n_reps=args.n_reps)
+                    fname = f"stv8_{short}_{iter_name}_c{cfg}_L{layer}.sbatch"
+                    with open(os.path.join(SCRIPTS_DIR, fname), 'w') as f:
+                        f.write(script)
+                    n += 1
+
+    gen_per_job = (5 + 3) * args.n_reps  # 5 old coeffs + 3 new conditions
+    print(f"Generated {n} sbatch scripts in {SCRIPTS_DIR}/")
+    print(f"  Iters: {ITERS}")
+    print(f"  Layers: {LAYERS}")
+    print(f"  Cfgs: {CFGS}")
+    print(f"  Users: {len(users)} (first {N_USERS})")
+    print(f"  Per job: {gen_per_job} gen × ~1.5 min = ~{gen_per_job * 1.5 / 60:.1f}h")
+    print(f"  Total: {n} jobs × {gen_per_job} = {n * gen_per_job:,} gen")
+
+
+if __name__ == "__main__":
+    main()

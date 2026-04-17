@@ -1,0 +1,311 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+Analyze trajectory steering results — Phase 2c (Redesigned Mar 30).
+
+Reads: outputs_{iter}/steering/per_user_v8/{uid}_cfg{cfg}_L{layer}.json
+Output: steering/output/
+
+Each JSON contains both methods:
+  Old: coefficients [-10,-5,-1,0,5] with raw V
+  New (Matteo): neutral / +V_emp / +V_unemp (raw, no coefficient)
+
+Usage:
+    python steering/analyze_steering_v8.py                              # all users
+    python steering/analyze_steering_v8.py --user 002f37b4c92c7b83      # one user
+    python steering/analyze_steering_v8.py --iter v7 --cfg 5            # filter
+"""
+import json, os, sys, glob, argparse
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUT_DIR = os.path.join(BASE_DIR, 'steering', 'output')
+os.makedirs(OUT_DIR, exist_ok=True)
+
+
+def load_all(iters=None, user_filter=None):
+    if iters is None:
+        iters = ['v7', 'v8']
+    all_data = []
+    for iter_name in iters:
+        pdir = os.path.join(BASE_DIR, f'outputs_{iter_name}', 'steering', 'per_user_v8')
+        if not os.path.exists(pdir):
+            continue
+        for f in sorted(glob.glob(os.path.join(pdir, '*.json'))):
+            with open(f) as fh:
+                d = json.load(fh)
+            d['meta']['iter'] = iter_name
+            if user_filter and user_filter not in d['meta']['user']:
+                continue
+            all_data.append(d)
+    print(f"Loaded {len(all_data)} files")
+    return all_data
+
+
+def get_old_reps(data, coeff):
+    for r in data['results']:
+        if r.get('method') == 'old' and r.get('coeff') == coeff:
+            return [x for x in r['reps'] if x.get('valid', False)]
+    return []
+
+
+def get_new_reps(data, condition):
+    for r in data['results']:
+        if r.get('method') == 'new' and r.get('condition') == condition:
+            return [x for x in r['reps'] if x.get('valid', False)]
+    return []
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Old Method Pages
+# ══════════════════════════════════════════════════════════════════════
+
+def pg_old_dose_response(pdf, data, title):
+    coeffs = data['meta'].get('old_coeffs', [-10, -5, -1, 0, 5])
+    fig, ax = plt.subplots(figsize=(10, 7))
+    hm, hs, wm, ws, ns = [], [], [], [], []
+    for c in coeffs:
+        reps = get_old_reps(data, c)
+        hv = [r['frac_home'] for r in reps]
+        wv = [r['frac_work'] for r in reps]
+        hm.append(np.mean(hv) if hv else 0); hs.append(np.std(hv) if hv else 0)
+        wm.append(np.mean(wv) if wv else 0); ws.append(np.std(wv) if wv else 0)
+        ns.append(len(reps))
+    ax.errorbar(coeffs, wm, yerr=ws, fmt='b-o', lw=2, capsize=4, label='frac_work', ms=8)
+    ax.errorbar(coeffs, hm, yerr=hs, fmt='r--s', lw=2, capsize=4, label='frac_home', ms=8)
+    for i, c in enumerate(coeffs):
+        ax.annotate(f'n={ns[i]}', (c, max(wm[i], hm[i]) + 0.05),
+                    ha='center', fontsize=7, color='gray')
+    ax.axvline(0, color='gray', ls='--', alpha=0.3)
+    ax.set_xlabel('Coefficient (neg=→unemp, pos=→emp)', fontsize=11)
+    ax.set_ylabel('Fraction', fontsize=11)
+    ax.set_title(f'{title}\nOld Method Dose-Response', fontweight='bold')
+    ax.legend(fontsize=10); ax.grid(True, alpha=0.15); ax.set_ylim(-0.05, 1.05)
+    plt.tight_layout(); pdf.savefig(fig, dpi=150); plt.close()
+
+
+def pg_old_boxplots(pdf, data, title):
+    coeffs = data['meta'].get('old_coeffs', [-10, -5, -1, 0, 5])
+    colors = {-10: '#b71c1c', -5: '#e53935', -1: '#ef9a9a',
+              0: '#90CAF9', 5: '#66BB6A', 10: '#2E7D32'}
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+    for ax, metric, mtitle in [(axes[0], 'frac_home', 'Fraction Home'),
+                                (axes[1], 'frac_work', 'Fraction Work')]:
+        box_data = []
+        for c in coeffs:
+            reps = get_old_reps(data, c)
+            box_data.append([r[metric] for r in reps] if reps else [0])
+        bp = ax.boxplot(box_data, labels=[f'c={c:+d}' for c in coeffs],
+                        patch_artist=True, widths=0.6)
+        for patch, c in zip(bp['boxes'], coeffs):
+            patch.set_facecolor(colors.get(c, '#ccc')); patch.set_alpha(0.7)
+        for i, vals in enumerate(box_data):
+            if len(vals) > 1:
+                x = np.random.normal(i + 1, 0.04, len(vals))
+                ax.scatter(x, vals, alpha=0.15, s=8, c='black', zorder=3)
+            ax.text(i + 1, np.mean(vals) + 0.02, f'{np.mean(vals):.2f}',
+                    ha='center', fontsize=8, fontweight='bold')
+        ax.set_ylabel(mtitle); ax.set_title(mtitle, fontweight='bold')
+        ax.grid(True, alpha=0.15, axis='y'); ax.set_ylim(-0.05, 1.05)
+    fig.suptitle(f'{title}\nOld Method', fontsize=12, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.92]); pdf.savefig(fig, dpi=150); plt.close()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# New Method Pages
+# ══════════════════════════════════════════════════════════════════════
+
+def pg_new_comparison(pdf, data, title):
+    conditions = ['neutral', 'emp', 'unemp']
+    cond_labels = ['Neutral\n(no hook)', '+V_emp\n(raw)', '+V_unemp\n(raw)']
+    colors = ['#90CAF9', '#4CAF50', '#FF5722']
+    fig, axes = plt.subplots(1, 2, figsize=(14, 7))
+    for ax, metric, mtitle in [(axes[0], 'frac_home', 'Fraction Home'),
+                                (axes[1], 'frac_work', 'Fraction Work')]:
+        means, stds, ns = [], [], []
+        for cond in conditions:
+            reps = get_new_reps(data, cond)
+            vals = [r[metric] for r in reps]
+            means.append(np.mean(vals) if vals else 0)
+            stds.append(np.std(vals) if vals else 0)
+            ns.append(len(reps))
+        x = np.arange(len(conditions))
+        ax.bar(x, means, yerr=stds, color=colors, alpha=0.8, capsize=5, width=0.5)
+        for i in range(len(conditions)):
+            ax.text(i, means[i] + stds[i] + 0.02, f'{means[i]:.3f}\n(n={ns[i]})',
+                    ha='center', fontsize=9, fontweight='bold')
+        ax.set_xticks(x); ax.set_xticklabels(cond_labels, fontsize=10)
+        ax.set_ylabel(mtitle); ax.set_title(mtitle, fontweight='bold')
+        ax.grid(True, alpha=0.15, axis='y'); ax.set_ylim(-0.05, 1.05)
+    fig.suptitle(f'{title}\nNew Method (Matteo): raw V_emp/V_unemp, no coeff',
+                 fontsize=12, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.90]); pdf.savefig(fig, dpi=150); plt.close()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Combined + Summary
+# ══════════════════════════════════════════════════════════════════════
+
+def pg_combined(pdf, data, title):
+    coeffs = data['meta'].get('old_coeffs', [-10, -5, -1, 0, 5])
+    fig, axes = plt.subplots(1, 2, figsize=(18, 7))
+    for ax, metric, mtitle in [(axes[0], 'frac_work', 'Fraction Work'),
+                                (axes[1], 'frac_home', 'Fraction Home')]:
+        means_old = []
+        for c in coeffs:
+            reps = get_old_reps(data, c)
+            vals = [r[metric] for r in reps]
+            means_old.append(np.mean(vals) if vals else 0)
+        ax.plot(coeffs, means_old, 'b-o', lw=2, ms=8, label='Old (coeffs)', zorder=5)
+        for cond, color, ls in [('neutral', '#90CAF9', '--'),
+                                 ('emp', '#4CAF50', '-'),
+                                 ('unemp', '#FF5722', '-')]:
+            reps = get_new_reps(data, cond)
+            vals = [r[metric] for r in reps]
+            m = np.mean(vals) if vals else 0
+            ax.axhline(m, color=color, ls=ls, lw=2, alpha=0.8,
+                       label=f'New:{cond} ({m:.3f})')
+        ax.axvline(0, color='gray', ls=':', alpha=0.3)
+        ax.set_xlabel('Old Method Coefficient'); ax.set_ylabel(mtitle)
+        ax.set_title(mtitle, fontweight='bold')
+        ax.legend(fontsize=8); ax.grid(True, alpha=0.15); ax.set_ylim(-0.05, 1.05)
+    fig.suptitle(f'{title}\nOld vs New Method', fontsize=12, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.92]); pdf.savefig(fig, dpi=150); plt.close()
+
+
+def pg_summary(pdf, data):
+    meta = data['meta']
+    fig, ax = plt.subplots(figsize=(16, 10)); ax.axis('off')
+    lines = []
+    lines.append(f'User: {meta["user"][:32]}\n')
+    lines.append(f'Iter: {meta.get("iter","?")}  Cfg: {meta["cfg_id"]}  Layer: {meta["layer"]}\n')
+    lines.append(f'Home: {meta["home_geo_id"]}  Work: {meta["work_geo_id"]}\n')
+    lines.append(f'Reps: {meta["n_reps"]}  Unnormalized: {meta.get("vectors_unnormalized","?")}\n')
+    lines.append(f'\n{"="*70}\n\n')
+    lines.append(f'OLD METHOD\n')
+    lines.append(f'{"Coeff":>8s} {"N":>5s} {"home":>8s} {"±":>6s} {"work":>8s} {"±":>6s}\n')
+    lines.append('─' * 50 + '\n')
+    for r in data['results']:
+        if r.get('method') != 'old': continue
+        lines.append(f'{r["coeff"]:>+8d} {r["n_valid"]:>5d} '
+                     f'{r["mean_frac_home"]:>8.3f} {r["std_frac_home"]:>6.3f} '
+                     f'{r["mean_frac_work"]:>8.3f} {r["std_frac_work"]:>6.3f}\n')
+    lines.append(f'\nNEW METHOD (Matteo)\n')
+    lines.append(f'{"Cond":>12s} {"N":>5s} {"home":>8s} {"±":>6s} {"work":>8s} {"±":>6s}\n')
+    lines.append('─' * 50 + '\n')
+    for r in data['results']:
+        if r.get('method') != 'new': continue
+        lines.append(f'{r["condition"]:>12s} {r["n_valid"]:>5d} '
+                     f'{r["mean_frac_home"]:>8.3f} {r["std_frac_home"]:>6.3f} '
+                     f'{r["mean_frac_work"]:>8.3f} {r["std_frac_work"]:>6.3f}\n')
+    ax.text(0.02, 0.98, ''.join(lines), transform=ax.transAxes,
+            fontsize=8, va='top', fontfamily='monospace')
+    fig.suptitle('Summary', fontsize=13, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.96]); pdf.savefig(fig, dpi=150); plt.close()
+
+
+def pg_examples(pdf, data, title):
+    meta = data['meta']
+    coeffs = meta.get('old_coeffs', [-10, -5, -1, 0, 5])
+    fig, ax = plt.subplots(figsize=(16, 14)); ax.axis('off')
+    lines = [f'{title} — Examples\n{"="*90}\n']
+    lines.append(f'Home: {meta["home_geo_id"]}  Work: {meta["work_geo_id"]}\n\n')
+    for c in [min(coeffs), 0, max(coeffs)]:
+        reps = get_old_reps(data, c)
+        if reps:
+            r = reps[0]
+            text = r.get('generated_text', '')[:250]
+            lines.append(f'[Old c={c:+d}] home={r["frac_home"]:.2f} '
+                         f'work={r["frac_work"]:.2f} slots={r["n_slots"]} '
+                         f'unique={r["n_unique"]}\n{text}...\n\n')
+    for cond in ['neutral', 'emp', 'unemp']:
+        reps = get_new_reps(data, cond)
+        if reps:
+            r = reps[0]
+            text = r.get('generated_text', '')[:250]
+            lines.append(f'[New {cond}] home={r["frac_home"]:.2f} '
+                         f'work={r["frac_work"]:.2f} slots={r["n_slots"]} '
+                         f'unique={r["n_unique"]}\n{text}...\n\n')
+    ax.text(0.02, 0.98, ''.join(lines), transform=ax.transAxes,
+            fontsize=6.5, va='top', fontfamily='monospace')
+    plt.tight_layout(); pdf.savefig(fig, dpi=150); plt.close()
+
+
+def pg_aggregate(pdf, all_data):
+    fig, ax = plt.subplots(figsize=(20, 14)); ax.axis('off')
+    lines = [f'AGGREGATE — {len(all_data)} files\n{"="*100}\n\n']
+    lines.append(f'{"Iter":>5s} {"Cfg":>4s} {"L":>4s} {"User":>14s} '
+                 f'{"Meth":>5s} {"Cond":>8s} {"N":>4s} '
+                 f'{"home":>7s} {"±":>5s} {"work":>7s} {"±":>5s}\n')
+    lines.append('─' * 80 + '\n')
+    for d in sorted(all_data, key=lambda x: (x['meta'].get('iter',''),
+                                              x['meta']['cfg_id'],
+                                              x['meta']['layer'])):
+        m = d['meta']
+        uid = m['user'][:12]
+        for r in d['results']:
+            meth = r.get('method', '?')
+            cond = f"c={r['coeff']:+d}" if meth == 'old' else r.get('condition', '?')
+            lines.append(f'{m.get("iter","?"):>5s} {m["cfg_id"]:>4d} '
+                         f'L{m["layer"]:>2d} {uid:>14s} '
+                         f'{meth:>5s} {cond:>8s} {r["n_valid"]:>4d} '
+                         f'{r["mean_frac_home"]:>7.3f} {r["std_frac_home"]:>5.3f} '
+                         f'{r["mean_frac_work"]:>7.3f} {r["std_frac_work"]:>5.3f}\n')
+    ax.text(0.01, 0.99, ''.join(lines), transform=ax.transAxes,
+            fontsize=5.5, va='top', fontfamily='monospace')
+    fig.suptitle('Aggregate', fontsize=13, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.97]); pdf.savefig(fig, dpi=150); plt.close()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--user', default=None, help='Filter by user ID (partial match)')
+    parser.add_argument('--iter', nargs='+', default=None)
+    parser.add_argument('--cfg', type=int, default=None)
+    parser.add_argument('--model', default='12b',
+                        choices=list(MODEL_REGISTRY.keys()),
+                        help='Model key (default: 12b)')
+    args = parser.parse_args()
+
+    iters = args.iter or ['v7', 'v8']
+    all_data = load_all(iters=iters, user_filter=args.user)
+    if not all_data:
+        print("No data found."); return
+
+    if args.cfg:
+        all_data = [d for d in all_data if d['meta']['cfg_id'] == args.cfg]
+        print(f"Filtered to cfg{args.cfg}: {len(all_data)} files")
+
+    pdf_name = f'steering_traj_{args.user[:12]}.pdf' if args.user else 'steering_traj_all.pdf'
+    pdf_path = os.path.join(OUT_DIR, pdf_name)
+
+    print(f"\nGenerating: {pdf_path}")
+    print(f"{'='*60}")
+
+    with PdfPages(pdf_path) as pdf:
+        for d in all_data:
+            m = d['meta']
+            t = f'{m.get("iter","?")} cfg{m["cfg_id"]} L{m["layer"]} {m["user"][:12]}'
+            print(f"  {t}")
+            pg_old_dose_response(pdf, d, t)
+            pg_old_boxplots(pdf, d, t)
+            pg_new_comparison(pdf, d, t)
+            pg_combined(pdf, d, t)
+            pg_examples(pdf, d, t)
+            pg_summary(pdf, d)
+        if len(all_data) > 1:
+            pg_aggregate(pdf, all_data)
+
+    print(f"\n{'='*60}")
+    print(f"Done! → {pdf_path}")
+    print(f"{'='*60}")
+
+
+if __name__ == "__main__":
+    main()

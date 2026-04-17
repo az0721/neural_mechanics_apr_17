@@ -2,9 +2,9 @@
 #SBATCH --job-name=u_86402ed1b1bf
 #SBATCH --partition=multigpu
 #SBATCH --gres=gpu:h200:1
-#SBATCH --time=2:00:00
+#SBATCH --time=1:00:00
 #SBATCH --mem=64G
-#SBATCH --cpus-per-task=12
+#SBATCH --cpus-per-task=4
 #SBATCH --output=/scratch/zhang.yicheng/llm_ft/neural_mechanics_v7/logs/u_86402ed1b1bf_%j.out
 #SBATCH --error=/scratch/zhang.yicheng/llm_ft/neural_mechanics_v7/logs/u_86402ed1b1bf_%j.err
 
@@ -16,4 +16,4 @@ module purge && module load cuda/12.1.1
 export HF_HOME=/scratch/$USER/.cache/huggingface
 export HF_HUB_OFFLINE=1 && export TRANSFORMERS_OFFLINE=1
 cd /scratch/zhang.yicheng/llm_ft/neural_mechanics_v7
-python -u run_extract_per_user.py --user 86402ed1b1bf5c8c4f0eb11dad5161f404cf7e9c65fc7046527e743ea9218fcd
+python -u run_extract_per_user.py --user 86402ed1b1bf5c8c4f0eb11dad5161f404cf7e9c65fc7046527e743ea9218fcd --align-v7
