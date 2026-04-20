@@ -1,34 +1,22 @@
-# Python cache
-__pycache__/
-*.pyc
+# ignore everything by default
+*
 
-# Jupyter cache
+# allow directory traversal
+!*/
+
+# allow only these file types
+!*.py
+!*.ipynb
+!*.sbatch
+!*.pdf
+
+# keep control files
+!.gitignore
+!README*
+
+# always ignore notebook checkpoints and common generated dirs
 .ipynb_checkpoints/
-
-# OS files
-.DS_Store
-
-# Logs
+**/.ipynb_checkpoints/
 logs/
-*.out
-*.err
-*.log
-
-# Big generated outputs
-outputs_v7/
-
-# Data (raw / large)
 data/
-
-# Common model artifacts
-checkpoints/
-*.pt
-*.pth
-*.bin
-*.ckpt
-*.safetensors
-*.npz
-
-# Caches
-.cache/
-wandb/
+outputs_v7/

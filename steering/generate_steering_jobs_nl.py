@@ -1,23 +1,23 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Generate sbatch scripts for NL-based steering experiments.
+Generate sbatch scripts for NL-based steering experiments (v2).
 
-Gemma 4 31B: 16 jobs = 2 iters × (4 exp2 cfgs + 2 exp1a cfgs) × 2 = wait no
-  exp2 CoT-only: cfg 2,4,6,8 → 4 cfgs × 2 iters = 8
-  exp1a CoT-only: cfg 2,4         → 2 cfgs × 2 iters = 4
+Gemma 4 31B:
+  exp2:  cfg 2,4,6,8 × 2 iters = 8 jobs
+  exp1a: cfg 2,4     × 2 iters = 4 jobs
   Total: 12 jobs
 
-Each job: ~20 questions × 60 layers × 10 passes ≈ 12,000 fwd passes ≈ 60-90 min
+Each job: 6 questions × 61 layers × 10 passes ≈ 3,660 fwd passes ≈ 12 min
 
 Usage:
     python steering/generate_steering_jobs_nl.py --model gemma4_31b
-    python steering/generate_steering_jobs_nl.py --model 12b
+    python steering/generate_steering_jobs_nl.py --model gemma4_31b --force
 """
 import os, sys, argparse
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from config import MODEL_REGISTRY, COT_ONLY_IDS, get_iter_output_dir
+from config import MODEL_REGISTRY, COT_ONLY_IDS
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPTS_DIR = os.path.join(BASE_DIR, 'scripts', 'nl_steering_jobs')
@@ -42,13 +42,13 @@ export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-echo "$(date) | NL Steering: {model} {iter} {exp} cfg{cfg}"
+echo "$(date) | NL Steering v2: {model} {iter} {exp} cfg{cfg}"
 
-# Step 1: Compute vectors (CPU, fast)
+# Step 1: Compute vectors (CPU, fast — skips if already exists)
 python -u steering/compute_vectors_nl.py --model {model} --iter {iter} --exp {exp} --cfgs {cfg}
 
 # Step 2: Run steering (GPU)
-python -u steering/run_steering_nl.py --model {model} --iter {iter} --exp {exp} --cfg {cfg}
+python -u steering/run_steering_nl.py --model {model} --iter {iter} --exp {exp} --cfg {cfg} {force_flag}
 
 echo "$(date) | Done"
 """
@@ -61,14 +61,17 @@ def main():
     parser.add_argument('--partition', default='gpu')
     parser.add_argument('--gpu-type', default='h200')
     parser.add_argument('--time-limit', default='00:30:00')
+    parser.add_argument('--force', action='store_true',
+                        help='Add --force flag to overwrite existing results')
     args = parser.parse_args()
 
-    cfg = MODEL_REGISTRY[args.model]
-    conda_env = cfg['conda_env']
+    mcfg = MODEL_REGISTRY[args.model]
+    conda_env = mcfg['conda_env']
     model_short = 'g4' if 'gemma4' in args.model else 'g3'
     mem = '64G' if 'gemma4' in args.model else '14G'
+    force_flag = '--force' if args.force else ''
 
-    # Build all combos: iter × exp × CoT-only cfgs
+    # Build all combos
     combos = []
     for it in ['v7', 'v8']:
         for exp in ['exp2', 'exp1a']:
@@ -76,19 +79,10 @@ def main():
                 combos.append((it, exp, cfg_id))
 
     os.makedirs(SCRIPTS_DIR, exist_ok=True)
-    os.makedirs(os.path.join(BASE_DIR, 'logs'), exist_ok=True)
+    os.makedirs(os.path.join(WORK_DIR, 'logs'), exist_ok=True)
 
     scripts = []
-    skipped = 0
     for it, exp, cfg_id in combos:
-        # Check if output already exists
-        # out_base = get_iter_output_dir(args.model, it)
-        # out_path = os.path.join(out_base, 'steering', 'nl_results',
-        #                         f"{exp}_cfg{cfg_id}_nl.json")
-        # if os.path.exists(out_path):
-        #     skipped += 1
-        #     continue
-
         script = SBATCH_TEMPLATE.format(
             model_short=model_short,
             iter=it, exp=exp, cfg=cfg_id,
@@ -99,8 +93,8 @@ def main():
             mem=mem,
             conda_env=conda_env,
             work_dir=WORK_DIR,
+            force_flag=force_flag,
         )
-
         fname = f"nl_{model_short}_{it}_{exp}_c{cfg_id}.sbatch"
         path = os.path.join(SCRIPTS_DIR, fname)
         with open(path, 'w') as f:
@@ -108,23 +102,28 @@ def main():
         scripts.append((path, it, exp, cfg_id))
 
     print(f"{'='*60}")
-    print(f"NL Steering Job Generator")
+    print(f"NL Steering Job Generator v2")
     print(f"{'='*60}")
-    print(f"  Model: {args.model} ({cfg['tag']})")
-    print(f"  Conda env: {conda_env}")
-    print(f"  Partition: {args.partition} ({args.gpu_type})")
+    print(f"  Model: {args.model} ({mcfg['tag']})")
+    print(f"  Conda: {conda_env}")
+    print(f"  GPU: {args.partition}/{args.gpu_type}")
     print(f"  Time: {args.time_limit}")
-    print(f"  Total combos: {len(combos)}")
-    print(f"  Already done: {skipped}")
-    print(f"  Generated: {len(scripts)} scripts")
-    print(f"  Scripts dir: {SCRIPTS_DIR}/")
+    print(f"  Force: {args.force}")
+    print(f"  Generated: {len(scripts)} jobs")
+    print(f"  Dir: {SCRIPTS_DIR}/")
     print()
 
     for path, it, exp, cfg_id in scripts:
         print(f"  {os.path.basename(path)}: {it}/{exp}/cfg{cfg_id}")
 
+    est_min = 12  # 6 questions × 61 layers × ~3660 passes
+    print(f"\n  Est per job: ~{est_min} min")
+    print(f"  Total sequential: ~{est_min * len(scripts)} min")
+    print(f"  Total parallel (12 GPUs): ~{est_min} min")
+
     print(f"\nTo submit all:")
-    print(f"  for f in {SCRIPTS_DIR}/nl_{model_short}_*.sbatch; do sbatch $f; sleep 0.3; done")
+    print(f"  for f in {SCRIPTS_DIR}/nl_{model_short}_*.sbatch; "
+          f"do sbatch $f; sleep 0.5; done")
     print(f"{'='*60}")
 
 

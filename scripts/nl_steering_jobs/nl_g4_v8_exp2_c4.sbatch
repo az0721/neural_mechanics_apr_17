@@ -17,12 +17,12 @@ export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-echo "$(date) | NL Steering: gemma4_31b v8 exp2 cfg4"
+echo "$(date) | NL Steering v2: gemma4_31b v8 exp2 cfg4"
 
-# Step 1: Compute vectors (CPU, fast)
+# Step 1: Compute vectors (CPU, fast — skips if already exists)
 python -u steering/compute_vectors_nl.py --model gemma4_31b --iter v8 --exp exp2 --cfgs 4
 
 # Step 2: Run steering (GPU)
-python -u steering/run_steering_nl.py --model gemma4_31b --iter v8 --exp exp2 --cfg 4
+python -u steering/run_steering_nl.py --model gemma4_31b --iter v8 --exp exp2 --cfg 4 --force
 
 echo "$(date) | Done"

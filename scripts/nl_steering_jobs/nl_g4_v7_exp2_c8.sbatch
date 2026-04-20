@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=nl_g4_v7_exp2_c8
-#SBATCH --partition=gpu
+#SBATCH --partition=multigpu
 #SBATCH --gres=gpu:h200:1
 #SBATCH --time=00:30:00
 #SBATCH --mem=64G
@@ -17,12 +17,12 @@ export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-echo "$(date) | NL Steering: gemma4_31b v7 exp2 cfg8"
+echo "$(date) | NL Steering v2: gemma4_31b v7 exp2 cfg8"
 
-# Step 1: Compute vectors (CPU, fast)
+# Step 1: Compute vectors (CPU, fast — skips if already exists)
 python -u steering/compute_vectors_nl.py --model gemma4_31b --iter v7 --exp exp2 --cfgs 8
 
 # Step 2: Run steering (GPU)
-python -u steering/run_steering_nl.py --model gemma4_31b --iter v7 --exp exp2 --cfg 8
+python -u steering/run_steering_nl.py --model gemma4_31b --iter v7 --exp exp2 --cfg 8 --force
 
 echo "$(date) | Done"

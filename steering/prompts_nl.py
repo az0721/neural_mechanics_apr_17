@@ -1,1169 +1,323 @@
-# #!/usr/bin/env python
-# # -*- coding: utf-8 -*-
-# """
-# NL-based steering prompts v5.
-
-# Revision based on GPT-4 critique of v4 (Apr 4):
-#   - REMOVED all income/lifestyle-confounded prompts:
-#       meals outside, free time, transport budget, dinner time, day description
-#   - REMOVED overly conversational/abstract prompts:
-#       phone call response, routine predictability (kept 1 as secondary)
-#   - ALL remaining prompts are either:
-#       (a) specific time-point behavioral states ("at X:00, where/what?")
-#       (b) observable mobility timing ("what time does person do Y?")
-#       (c) mobility-grounded durations ("how many hours at/away from home?")
-#   - These map directly to GPS trajectory data (verifiable)
-#   - Satisfy instrumental variable: correlated with employment/weekday,
-#     NOT confounded by income, lifestyle, personality, family structure
-
-# Design criteria (Matteo Apr 3 meeting):
-#   - No "Boston", no "employed/work/weekday/weekend"
-#   - Prefer numeric (quantitative, easier to interpret)
-#   - Balanced MCQ choices (~33% neutral baseline each)
-#   - Timing proxies > spending proxies > abstract proxies
-
-# Exp2 (Employment):  10 Numeric + 10 MCQ = 20 questions
-# Exp1a (Weekday):    10 Numeric + 10 MCQ = 20 questions
-# """
-
-# # ══════════════════════════════════════════════════════════════════════
-# # Experiment 2: Employed vs Unemployed
-# # ══════════════════════════════════════════════════════════════════════
-# # positive coeff = toward employed, negative = toward unemployed
-# # All users in this exp are on WEEKDAYS only.
-
-# EXP2_QUESTIONS = [
-#     # ══════════════════════════════════════
-#     # NUMERIC (10) — all timing/mobility-grounded
-#     # ══════════════════════════════════════
-#     {
-#         'id': 'E1', 'type': 'numeric', 'exp': 'exp2',
-#         'prompt': (
-#             'Complete with a single number only.\n'
-#             'A typical adult wakes up at approximately ___:00 AM '
-#             'on a Tuesday.\n'
-#         ),
-#         'description': 'Wake-up hour (Tue)',
-#         'eval_method': 'digit_distribution', 'is_control': False,
-#         'strength': 'strong',  # Matteo's canonical example
-#     },
-#     {
-#         'id': 'E2', 'type': 'numeric', 'exp': 'exp2',
-#         'prompt': (
-#             'Complete with a single number only.\n'
-#             'A typical adult leaves home at approximately ___:00 AM '
-#             'on a Tuesday.\n'
-#         ),
-#         'description': 'Leave-home hour (Tue)',
-#         'eval_method': 'digit_distribution', 'is_control': False,
-#         'strength': 'strong',
-#     },
-#     {
-#         'id': 'E3', 'type': 'numeric', 'exp': 'exp2',
-#         'prompt': (
-#             'Complete with a single number only.\n'
-#             'A typical adult arrives home at approximately ___:00 PM '
-#             'on a Tuesday.\n'
-#         ),
-#         'description': 'Arrive-home hour (Tue)',
-#         'eval_method': 'digit_distribution', 'is_control': False,
-#         'strength': 'strong',
-#     },
-#     {
-#         'id': 'E4', 'type': 'numeric', 'exp': 'exp2',
-#         'prompt': (
-#             'Answer with a single digit from 0 to 9.\n'
-#             'How many hours does a typical adult spend at home '
-#             'between 8 AM and 6 PM on a Tuesday? ___\n'
-#         ),
-#         'description': 'Daytime hours at home (Tue)',
-#         'eval_method': 'digit_distribution', 'is_control': False,
-#         'strength': 'strong',  # grounded, directly from GPS
-#     },
-#     {
-#         'id': 'E5', 'type': 'numeric', 'exp': 'exp2',
-#         'prompt': (
-#             'Answer with a single digit from 0 to 9.\n'
-#             'What is the longest continuous stretch of hours '
-#             'a typical adult spends outside the home on a Tuesday? ___\n'
-#         ),
-#         'description': 'Longest stretch outside (Tue)',
-#         'eval_method': 'digit_distribution', 'is_control': False,
-#         'strength': 'strong',  # captures "office-like" block
-#     },
-#     {
-#         'id': 'E6', 'type': 'numeric', 'exp': 'exp2',
-#         'prompt': (
-#             'Answer with a single digit from 0 to 9.\n'
-#             'How many total hours is a typical adult away from home '
-#             'on a Tuesday? ___\n'
-#         ),
-#         'description': 'Total hours away (Tue)',
-#         'eval_method': 'digit_distribution', 'is_control': False,
-#         'strength': 'strong',
-#     },
-#     {
-#         'id': 'E7', 'type': 'numeric', 'exp': 'exp2',
-#         'prompt': (
-#             'Answer with a single digit from 0 to 9.\n'
-#             'How many hours does a typical adult spend at their '
-#             'most frequently visited non-home location on a Tuesday? ___\n'
-#         ),
-#         'description': 'Hours at primary non-home location (Tue)',
-#         'eval_method': 'digit_distribution', 'is_control': False,
-#         'strength': 'strong',  # captures regularity without saying "work"
-#     },
-#     {
-#         'id': 'E8', 'type': 'numeric', 'exp': 'exp2',
-#         'prompt': (
-#             'Answer with a single digit from 0 to 9.\n'
-#             'How many times does a typical adult return home '
-#             'during the daytime (8 AM to 6 PM) on a Tuesday? ___\n'
-#         ),
-#         'description': 'Daytime home returns (Tue)',
-#         'eval_method': 'digit_distribution', 'is_control': False,
-#         'strength': 'medium',  # employed=0-1, unemployed=multiple
-#     },
-#     {
-#         'id': 'E9', 'type': 'numeric', 'exp': 'exp2',
-#         'prompt': (
-#             'Answer with a single digit from 0 to 9.\n'
-#             'How many hours does a typical adult spend commuting '
-#             'or in transit on a Tuesday? ___\n'
-#         ),
-#         'description': 'Commute/transit hours (Tue)',
-#         'eval_method': 'digit_distribution', 'is_control': False,
-#         'strength': 'medium',  # employed commute more
-#     },
-#     {
-#         'id': 'E10', 'type': 'numeric', 'exp': 'exp2',
-#         'prompt': (
-#             'Answer with a single digit from 0 to 9.\n'
-#             'On a scale of 0 to 9, how consistent is a typical '
-#             'adult\'s Tuesday schedule from week to week? '
-#             '(0 = completely different, 9 = identical every week) ___\n'
-#         ),
-#         'description': 'Week-to-week consistency (Tue)',
-#         'eval_method': 'digit_distribution', 'is_control': False,
-#         'strength': 'secondary',  # more abstract, but still timing-related
-#     },
-
-#     # ══════════════════════════════════════
-#     # MCQ (10) — all time-anchored behavioral states
-#     # ══════════════════════════════════════
-#     {
-#         'id': 'E11', 'type': 'mcq', 'exp': 'exp2',
-#         'prompt': (
-#             'At 8:00 AM on a Tuesday, a typical adult is most likely:\n'
-#             '(A) Still sleeping or just waking up\n'
-#             '(B) Awake at home, starting the day slowly\n'
-#             '(C) Already out of the house or about to leave\n'
-#             'Answer: ('
-#         ),
-#         'description': '8 AM Tuesday status',
-#         'target_option_pos': 'C', 'target_option_neg': 'A', 'target_option_neu': 'B',
-#         'eval_method': 'mcq', 'is_control': False,
-#         'strength': 'strong',
-#     },
-#     {
-#         'id': 'E12', 'type': 'mcq', 'exp': 'exp2',
-#         'prompt': (
-#             'A typical adult is asked: "Are you usually free to meet '
-#             'for coffee at 10:30 AM on a Tuesday?"\n'
-#             'The most likely reply is:\n'
-#             '(A) "Yes, I am usually available around that time."\n'
-#             '(B) "It depends on the week; sometimes I can, sometimes not."\n'
-#             '(C) "No, I am almost always occupied at that hour."\n'
-#             'Answer: ('
-#         ),
-#         'description': '10:30 AM coffee availability',
-#         'target_option_pos': 'C', 'target_option_neg': 'A', 'target_option_neu': 'B',
-#         'eval_method': 'mcq', 'is_control': False,
-#         'strength': 'strong',
-#     },
-#     {
-#         'id': 'E13', 'type': 'mcq', 'exp': 'exp2',
-#         'prompt': (
-#             'A typical adult is asked: "Can you meet me for lunch '
-#             'at noon on a Tuesday?"\n'
-#             'The most likely reply is:\n'
-#             '(A) "Sure, I have no fixed plans around that time."\n'
-#             '(B) "I can, but I only have about 30 minutes."\n'
-#             '(C) "Sorry, I cannot leave where I am at noon."\n'
-#             'Answer: ('
-#         ),
-#         'description': 'Noon Tuesday availability',
-#         'target_option_pos': 'C', 'target_option_neg': 'A', 'target_option_neu': 'B',
-#         'eval_method': 'mcq', 'is_control': False,
-#         'strength': 'strong',
-#     },
-#     {
-#         'id': 'E14', 'type': 'mcq', 'exp': 'exp2',
-#         'prompt': (
-#             'If you wanted to visit a typical adult at 1 PM '
-#             'on a Tuesday, which reply would be most likely?\n'
-#             '(A) "I am usually at home around then."\n'
-#             '(B) "I am usually at a regular daytime commitment then."\n'
-#             '(C) "It varies; I might be in different places."\n'
-#             'Answer: ('
-#         ),
-#         'description': '1 PM Tuesday availability',
-#         'target_option_pos': 'B', 'target_option_neg': 'A', 'target_option_neu': 'C',
-#         'eval_method': 'mcq', 'is_control': False,
-#         'strength': 'strong',
-#     },
-#     {
-#         'id': 'E15', 'type': 'mcq', 'exp': 'exp2',
-#         'prompt': (
-#             'At 3:00 PM on a Tuesday, a typical adult is most likely:\n'
-#             '(A) At home\n'
-#             '(B) At the same non-home location they have been all day\n'
-#             '(C) Moving between different locations\n'
-#             'Answer: ('
-#         ),
-#         'description': '3 PM Tuesday location',
-#         'target_option_pos': 'B', 'target_option_neg': 'A', 'target_option_neu': 'C',
-#         'eval_method': 'mcq', 'is_control': False,
-#         'strength': 'strong',
-#     },
-#     {
-#         'id': 'E16', 'type': 'mcq', 'exp': 'exp2',
-#         'prompt': (
-#             'At 5:00 PM on a Tuesday, a typical adult is most likely:\n'
-#             '(A) At home, where they have been most of the day\n'
-#             '(B) Heading home from a regular daytime location\n'
-#             '(C) Still at a non-home location with no plans to leave yet\n'
-#             'Answer: ('
-#         ),
-#         'description': '5 PM Tuesday status',
-#         'target_option_pos': 'B', 'target_option_neg': 'A', 'target_option_neu': 'C',
-#         'eval_method': 'mcq', 'is_control': False,
-#         'strength': 'strong',
-#     },
-#     {
-#         'id': 'E17', 'type': 'mcq', 'exp': 'exp2',
-#         'prompt': (
-#             'At 7:00 PM on a Tuesday, a typical adult is most likely:\n'
-#             '(A) Has been home most of the day\n'
-#             '(B) Recently arrived home after being out all day\n'
-#             '(C) Still out, not yet headed home\n'
-#             'Answer: ('
-#         ),
-#         'description': '7 PM Tuesday status',
-#         'target_option_pos': 'B', 'target_option_neg': 'A', 'target_option_neu': 'C',
-#         'eval_method': 'mcq', 'is_control': False,
-#         'strength': 'medium',
-#     },
-#     {
-#         'id': 'E18', 'type': 'mcq', 'exp': 'exp2',
-#         'prompt': (
-#             'Does a typical adult use an alarm clock on Tuesday mornings?\n'
-#             '(A) No, they wake up naturally whenever they feel like it\n'
-#             '(B) Sometimes, depending on whether they have plans\n'
-#             '(C) Yes, they set an alarm at the same time every Tuesday\n'
-#             'Answer: ('
-#         ),
-#         'description': 'Alarm clock habit (Tue)',
-#         'target_option_pos': 'C', 'target_option_neg': 'A', 'target_option_neu': 'B',
-#         'eval_method': 'mcq', 'is_control': False,
-#         'strength': 'medium',
-#     },
-#     {
-#         'id': 'E19', 'type': 'mcq', 'exp': 'exp2',
-#         'prompt': (
-#             'Does a typical adult leave home at the same time '
-#             'every Tuesday?\n'
-#             '(A) No, the departure time varies a lot\n'
-#             '(B) Roughly similar, but not exact\n'
-#             '(C) Yes, within a few minutes of the same time\n'
-#             'Answer: ('
-#         ),
-#         'description': 'Departure time consistency (Tue)',
-#         'target_option_pos': 'C', 'target_option_neg': 'A', 'target_option_neu': 'B',
-#         'eval_method': 'mcq', 'is_control': False,
-#         'strength': 'medium',
-#     },
-#     {
-#         'id': 'E20', 'type': 'mcq', 'exp': 'exp2',
-#         'prompt': (
-#             'Is a typical adult at the same non-home location '
-#             'at noon every Tuesday?\n'
-#             '(A) No, they are usually at home at noon\n'
-#             '(B) Sometimes the same place, sometimes not\n'
-#             '(C) Yes, almost always at the same location\n'
-#             'Answer: ('
-#         ),
-#         'description': 'Noon location consistency (Tue)',
-#         'target_option_pos': 'C', 'target_option_neg': 'A', 'target_option_neu': 'B',
-#         'eval_method': 'mcq', 'is_control': False,
-#         'strength': 'medium',
-#     },
-# ]
-
-
-# # ══════════════════════════════════════════════════════════════════════
-# # Experiment 1a: Weekday vs Weekend
-# # ══════════════════════════════════════════════════════════════════════
-# # positive coeff = toward weekday, negative = toward weekend
-# # All users in this exp are EMPLOYED.
-
-# EXP1A_QUESTIONS = [
-#     # ══════════════════════════════════════
-#     # NUMERIC (10) — all timing/mobility-grounded
-#     # ══════════════════════════════════════
-#     {
-#         'id': 'W1', 'type': 'numeric', 'exp': 'exp1a',
-#         'prompt': (
-#             'Complete with a single number only.\n'
-#             'An individual wakes up at approximately ___:00 AM.\n'
-#         ),
-#         'description': 'Wake-up hour',
-#         'eval_method': 'digit_distribution', 'is_control': False,
-#         'strength': 'strong',
-#     },
-#     {
-#         'id': 'W2', 'type': 'numeric', 'exp': 'exp1a',
-#         'prompt': (
-#             'Complete with a single number only.\n'
-#             'An individual leaves home at approximately ___:00 AM.\n'
-#         ),
-#         'description': 'Leave-home hour',
-#         'eval_method': 'digit_distribution', 'is_control': False,
-#         'strength': 'strong',
-#     },
-#     {
-#         'id': 'W3', 'type': 'numeric', 'exp': 'exp1a',
-#         'prompt': (
-#             'Complete with a single number only.\n'
-#             'An individual arrives home at approximately ___:00 PM.\n'
-#         ),
-#         'description': 'Arrive-home hour',
-#         'eval_method': 'digit_distribution', 'is_control': False,
-#         'strength': 'strong',
-#     },
-#     {
-#         'id': 'W4', 'type': 'numeric', 'exp': 'exp1a',
-#         'prompt': (
-#             'Answer with a single digit from 0 to 9.\n'
-#             'How many hours does an individual spend at home '
-#             'between 8 AM and 6 PM? ___\n'
-#         ),
-#         'description': 'Daytime hours at home',
-#         'eval_method': 'digit_distribution', 'is_control': False,
-#         'strength': 'strong',
-#     },
-#     {
-#         'id': 'W5', 'type': 'numeric', 'exp': 'exp1a',
-#         'prompt': (
-#             'Answer with a single digit from 0 to 9.\n'
-#             'What is the longest continuous stretch of hours '
-#             'an individual spends outside the home today? ___\n'
-#         ),
-#         'description': 'Longest stretch outside',
-#         'eval_method': 'digit_distribution', 'is_control': False,
-#         'strength': 'strong',
-#     },
-#     {
-#         'id': 'W6', 'type': 'numeric', 'exp': 'exp1a',
-#         'prompt': (
-#             'Answer with a single digit from 0 to 9.\n'
-#             'How many total hours is an individual away from home '
-#             'today? ___\n'
-#         ),
-#         'description': 'Total hours away',
-#         'eval_method': 'digit_distribution', 'is_control': False,
-#         'strength': 'strong',
-#     },
-#     {
-#         'id': 'W7', 'type': 'numeric', 'exp': 'exp1a',
-#         'prompt': (
-#             'Answer with a single digit from 0 to 9.\n'
-#             'How many hours does an individual spend at their '
-#             'most frequently visited non-home location today? ___\n'
-#         ),
-#         'description': 'Hours at primary non-home location',
-#         'eval_method': 'digit_distribution', 'is_control': False,
-#         'strength': 'strong',
-#     },
-#     {
-#         'id': 'W8', 'type': 'numeric', 'exp': 'exp1a',
-#         'prompt': (
-#             'Answer with a single digit from 0 to 9.\n'
-#             'How many times does an individual return home '
-#             'during the daytime (8 AM to 6 PM) today? ___\n'
-#         ),
-#         'description': 'Daytime home returns',
-#         'eval_method': 'digit_distribution', 'is_control': False,
-#         'strength': 'medium',
-#     },
-#     {
-#         'id': 'W9', 'type': 'numeric', 'exp': 'exp1a',
-#         'prompt': (
-#             'Answer with a single digit from 0 to 9.\n'
-#             'How many hours does an individual spend commuting '
-#             'or in transit today? ___\n'
-#         ),
-#         'description': 'Commute/transit hours',
-#         'eval_method': 'digit_distribution', 'is_control': False,
-#         'strength': 'medium',
-#     },
-#     {
-#         'id': 'W10', 'type': 'numeric', 'exp': 'exp1a',
-#         'prompt': (
-#             'Answer with a single digit from 0 to 9.\n'
-#             'On a scale of 0 to 9, how consistent is an individual\'s '
-#             'schedule today compared to the same day last week? '
-#             '(0 = completely different, 9 = identical) ___\n'
-#         ),
-#         'description': 'Week-to-week consistency',
-#         'eval_method': 'digit_distribution', 'is_control': False,
-#         'strength': 'secondary',
-#     },
-
-#     # ══════════════════════════════════════
-#     # MCQ (10) — all time-anchored behavioral states
-#     # ══════════════════════════════════════
-#     {
-#         'id': 'W11', 'type': 'mcq', 'exp': 'exp1a',
-#         'prompt': (
-#             'At 8:00 AM, an individual is most likely:\n'
-#             '(A) Still sleeping or just waking up\n'
-#             '(B) Awake at home, starting the day slowly\n'
-#             '(C) Already out of the house or about to leave\n'
-#             'Answer: ('
-#         ),
-#         'description': '8 AM status',
-#         'target_option_pos': 'C', 'target_option_neg': 'A', 'target_option_neu': 'B',
-#         'eval_method': 'mcq', 'is_control': False,
-#         'strength': 'strong',
-#     },
-#     {
-#         'id': 'W12', 'type': 'mcq', 'exp': 'exp1a',
-#         'prompt': (
-#             'An individual is asked: "Are you usually free to meet '
-#             'for coffee at 10:30 AM?"\n'
-#             'The most likely reply is:\n'
-#             '(A) "Yes, I am usually available around that time."\n'
-#             '(B) "It depends; sometimes I can, sometimes not."\n'
-#             '(C) "No, I am almost always occupied at that hour."\n'
-#             'Answer: ('
-#         ),
-#         'description': '10:30 AM coffee availability',
-#         'target_option_pos': 'C', 'target_option_neg': 'A', 'target_option_neu': 'B',
-#         'eval_method': 'mcq', 'is_control': False,
-#         'strength': 'strong',
-#     },
-#     {
-#         'id': 'W13', 'type': 'mcq', 'exp': 'exp1a',
-#         'prompt': (
-#             'An individual is asked: "Can you meet me for lunch '
-#             'at noon?"\n'
-#             'The most likely reply is:\n'
-#             '(A) "Sure, I have no fixed plans around that time."\n'
-#             '(B) "I can, but I only have about 30 minutes."\n'
-#             '(C) "Sorry, I cannot leave where I am at noon."\n'
-#             'Answer: ('
-#         ),
-#         'description': 'Noon availability',
-#         'target_option_pos': 'C', 'target_option_neg': 'A', 'target_option_neu': 'B',
-#         'eval_method': 'mcq', 'is_control': False,
-#         'strength': 'strong',
-#     },
-#     {
-#         'id': 'W14', 'type': 'mcq', 'exp': 'exp1a',
-#         'prompt': (
-#             'At 3:00 PM, an individual is most likely:\n'
-#             '(A) At home\n'
-#             '(B) At the same non-home location they have been all day\n'
-#             '(C) Moving between different locations\n'
-#             'Answer: ('
-#         ),
-#         'description': '3 PM location',
-#         'target_option_pos': 'B', 'target_option_neg': 'A', 'target_option_neu': 'C',
-#         'eval_method': 'mcq', 'is_control': False,
-#         'strength': 'strong',
-#     },
-#     {
-#         'id': 'W15', 'type': 'mcq', 'exp': 'exp1a',
-#         'prompt': (
-#             'At 5:00 PM, an individual is most likely:\n'
-#             '(A) At home, where they have been most of the day\n'
-#             '(B) Heading home from a regular daytime location\n'
-#             '(C) Still at a non-home location with no plans to leave yet\n'
-#             'Answer: ('
-#         ),
-#         'description': '5 PM status',
-#         'target_option_pos': 'B', 'target_option_neg': 'A', 'target_option_neu': 'C',
-#         'eval_method': 'mcq', 'is_control': False,
-#         'strength': 'strong',
-#     },
-#     {
-#         'id': 'W16', 'type': 'mcq', 'exp': 'exp1a',
-#         'prompt': (
-#             'At 7:00 PM, an individual is most likely:\n'
-#             '(A) Has been home most of the day\n'
-#             '(B) Recently arrived home after being out all day\n'
-#             '(C) Still out, not yet headed home\n'
-#             'Answer: ('
-#         ),
-#         'description': '7 PM status',
-#         'target_option_pos': 'B', 'target_option_neg': 'A', 'target_option_neu': 'C',
-#         'eval_method': 'mcq', 'is_control': False,
-#         'strength': 'medium',
-#     },
-#     {
-#         'id': 'W17', 'type': 'mcq', 'exp': 'exp1a',
-#         'prompt': (
-#             'Does an individual use an alarm clock this morning?\n'
-#             '(A) No, they wake up naturally\n'
-#             '(B) Maybe, depending on plans\n'
-#             '(C) Yes, set for a specific early time\n'
-#             'Answer: ('
-#         ),
-#         'description': 'Alarm clock usage',
-#         'target_option_pos': 'C', 'target_option_neg': 'A', 'target_option_neu': 'B',
-#         'eval_method': 'mcq', 'is_control': False,
-#         'strength': 'medium',
-#     },
-#     {
-#         'id': 'W18', 'type': 'mcq', 'exp': 'exp1a',
-#         'prompt': (
-#             'Does an individual leave home at the same time today '
-#             'as they did the same day last week?\n'
-#             '(A) No, the departure time is very different\n'
-#             '(B) Roughly similar, but not exact\n'
-#             '(C) Yes, within a few minutes of the same time\n'
-#             'Answer: ('
-#         ),
-#         'description': 'Departure time consistency',
-#         'target_option_pos': 'C', 'target_option_neg': 'A', 'target_option_neu': 'B',
-#         'eval_method': 'mcq', 'is_control': False,
-#         'strength': 'medium',
-#     },
-#     {
-#         'id': 'W19', 'type': 'mcq', 'exp': 'exp1a',
-#         'prompt': (
-#             'Is an individual at the same non-home location '
-#             'at noon today as they were at noon last week?\n'
-#             '(A) No, they are at home today\n'
-#             '(B) They are out, but at a different location\n'
-#             '(C) Yes, at the same location\n'
-#             'Answer: ('
-#         ),
-#         'description': 'Noon location consistency',
-#         'target_option_pos': 'C', 'target_option_neg': 'A', 'target_option_neu': 'B',
-#         'eval_method': 'mcq', 'is_control': False,
-#         'strength': 'medium',
-#     },
-#     {
-#         'id': 'W20', 'type': 'mcq', 'exp': 'exp1a',
-#         'prompt': (
-#             'If an individual is asked at 1 PM: '
-#             '"Where are you right now?"\n'
-#             'The most likely answer is:\n'
-#             '(A) "I am at home."\n'
-#             '(B) "I am at a regular place I go to most days."\n'
-#             '(C) "I am out, but somewhere different from usual."\n'
-#             'Answer: ('
-#         ),
-#         'description': '1 PM location',
-#         'target_option_pos': 'B', 'target_option_neg': 'A', 'target_option_neu': 'C',
-#         'eval_method': 'mcq', 'is_control': False,
-#         'strength': 'strong',
-#     },
-# ]
-
-
-# ALL_QUESTIONS = {
-#     'exp2': EXP2_QUESTIONS,
-#     'exp1a': EXP1A_QUESTIONS,
-# }
-
-# MCQ_TOKENS = ['A', 'B', 'C']
-# DIGIT_TOKENS = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-NL-based steering prompts v6.
+NL-based steering prompts v9 (Apr 20).
 
-Changes from v5:
-  - ALL MCQ prompts: 'Answer: (' → 'Answer with only the letter A, B, or C: '
-    Fixes Gemma 4 logit extraction: P(A)+P(B)+P(C) now sums to ~1.0
-    (was ~0.08 because model wanted to output '(' before the letter)
-  - Exp1a: kept "today" intentionally — specifying "Tuesday" would
-    reveal weekday identity, defeating the weekday-vs-weekend contrast.
-    Exp1a steering tests whether the model's concept of "today" shifts
-    toward weekday or weekend behavior patterns.
-  - Exp2: already specifies "Tuesday" throughout (correct for
-    employed-vs-unemployed on weekdays).
+10 fine-grained questions using two-letter codes.
+Each code is a single token in Gemma's tokenizer (verified).
 
-Design criteria (Matteo Apr 3 meeting):
-  - No "Boston", no "employed/work/weekday/weekend"
-  - Prefer numeric (quantitative, easier to interpret)
-  - Balanced MCQ choices (~33% neutral baseline each)
-  - Timing proxies > spending proxies > abstract proxies
+Exp2  (emp/unemp):   5 questions — time(2) + spending(1) + asset(1) + social(1)
+Exp1a (wkday/wkend): 5 questions — time(2) + food(1) + leisure(1) + social(1)
 
-Exp2 (Employment):  10 Numeric + 10 MCQ = 20 questions
-Exp1a (Weekday):    10 Numeric + 10 MCQ = 20 questions
+Answer formats:
+  'pct'    — 0% to 100% in 2% steps, 51 options (codes aa..ca)
+  'time'   — 5:00AM to 11:55AM in 5-min steps, 84 options (codes aa..di)
+  'dollar' — $2,000 to $27,000 in $500 steps, 51 options (codes aa..ca)
+  'count'  — 0 to 98 in steps of 2, plus 100+, 51 options (codes aa..ca)
+  'hours'  — 0.0h to 25.0h in 0.5h steps, 51 options (codes aa..ca)
+
+Tested baseline distributions on Gemma-4-31B (Apr 20, 2026):
+  FG_E2  P(breakfast 8AM Tue) Peak=0.43  >0.5%=8   ← time
+  FG_E3  P(coffee 7AM Tue)    Peak=0.50  >0.5%=6   ← time
+  FG_E4  P(lunch>$10 Tue)     Peak=0.50  >0.5%=7   ← spending
+  FG_E5  Car value $2k-$27k   Peak=0.54  >0.5%=4   ← asset
+  FG_E6  Msgs to coworkers    Peak=0.34  >0.5%=8   ← social (BEST)
+  FG_W1  Wake-up time         Peak=0.54  >0.5%=3   ← time
+  FG_W4  Meals cooked today%  Peak=0.40  >0.5%=10  ← food
+  FG_W5  Entertainment today% Peak=0.46  >0.5%=10  ← leisure
+  FG_W6  Hours social w/ F&F  Peak=0.37  >0.5%=6   ← social
+  FG_W7  P(breakfast 8AM)     Peak=0.31  >0.5%=6   ← time (BEST overall)
 """
 
-MCQ_SUFFIX = 'Answer with only the letter A, B, or C: '
+# ══════════════════════════════════════════════════════════════════════
+# Code pools and labels
+# ══════════════════════════════════════════════════════════════════════
+
+_SPLIT_PAIRS = {'gq', 'lq', 'qf', 'qg', 'qj', 'tq', 'vj', 'wz', 'yq', 'yv'}
+
+TWOLETTER_CODES = sorted([
+    a + b
+    for a in 'abcdefghijklmnopqrstuvwxyz'
+    for b in 'abcdefghijklmnopqrstuvwxyz'
+    if (a + b) not in _SPLIT_PAIRS and 'q' not in (a + b)
+])  # 622 codes
+
+# ── pct: 0%..100% in 2% steps = 51 options ──
+FG_PCT_CODES  = TWOLETTER_CODES[:51]   # aa..ca
+FG_PCT_LABELS = [f'{i}%' for i in range(0, 102, 2)]
+
+# ── time: 5:00AM..11:55AM in 5-min steps = 84 options ──
+FG_TIME_CODES = TWOLETTER_CODES[:84]   # aa..di
+FG_TIME_LABELS = []
+for _h in range(5, 12):
+    for _m in range(0, 60, 5):
+        FG_TIME_LABELS.append(f'{_h}:{_m:02d}AM')
+
+# ── dollar: $2,000..$27,000 in $500 steps = 51 options ──
+FG_DOLLAR_CODES  = TWOLETTER_CODES[:51]
+FG_DOLLAR_LABELS = [f'${2000 + i * 500:,}' for i in range(51)]
+
+# ── count: 0,2,4,...,98,100+ = 51 options ──
+FG_COUNT_CODES  = TWOLETTER_CODES[:51]
+FG_COUNT_LABELS = [str(i * 2) for i in range(50)] + ['100+']
+
+# ── hours: 0.0h..25.0h in 0.5h steps = 51 options ──
+FG_HOURS_CODES  = TWOLETTER_CODES[:51]
+FG_HOURS_LABELS = [f'{i * 0.5:.1f}h' for i in range(51)]
+
+
+# Helper to build "Pick one: aa=X, ab=Y, ..." string
+def _opts(codes, labels):
+    return ', '.join(f'{c}={l}' for c, l in zip(codes, labels))
+
+
+_PCT_OPTS = _opts(FG_PCT_CODES, FG_PCT_LABELS)
+_DOLLAR_OPTS = _opts(FG_DOLLAR_CODES, FG_DOLLAR_LABELS)
+_COUNT_OPTS = _opts(FG_COUNT_CODES, FG_COUNT_LABELS)
+_HOURS_OPTS = _opts(FG_HOURS_CODES, FG_HOURS_LABELS)
+_TIME_OPTS = _opts(FG_TIME_CODES, FG_TIME_LABELS)
+
 
 # ══════════════════════════════════════════════════════════════════════
-# Experiment 2: Employed vs Unemployed
+# Experiment 2: Employed vs Unemployed  (5 questions)
 # ══════════════════════════════════════════════════════════════════════
-# positive coeff = toward employed, negative = toward unemployed
-# All users in this exp are on WEEKDAYS only.
+# E2/E3: on Tuesday (controls weekday/weekend variable).
+# E4: on Tuesday (same reason).
+# E5/E6: on Tuesday (employment-specific).
 
 EXP2_QUESTIONS = [
-    # ══════════════════════════════════════
-    # NUMERIC (10) — all timing/mobility-grounded
-    # ══════════════════════════════════════
+    # ── E2: Time dimension — breakfast ──
     {
-        'id': 'E1', 'type': 'numeric', 'exp': 'exp2',
-        'prompt': (
-            'Complete with a single number only.\n'
-            'A typical adult wakes up at approximately ___:00 AM '
-            'on a Tuesday.\n'
-        ),
-        'description': 'Wake-up hour (Tue)',
-        'eval_method': 'digit_distribution', 'is_control': False,
+        'id': 'FG_E2',
+        'type': 'finegrain',
+        'exp': 'exp2',
+        'answer_format': 'pct',
+        'fg_codes': FG_PCT_CODES,
+        'fg_labels': FG_PCT_LABELS,
+        'description': 'P(breakfast by 8AM Tue)',
+        'eval_method': 'finegrain_distribution',
+        'is_control': False,
         'strength': 'strong',
-    },
-    {
-        'id': 'E2', 'type': 'numeric', 'exp': 'exp2',
         'prompt': (
-            'Complete with a single number only.\n'
-            'A typical adult leaves home at approximately ___:00 AM '
-            'on a Tuesday.\n'
+            'What is the probability that a typical adult has eaten '
+            'breakfast by 8:00 AM on a Tuesday? '
+            'Pick one: ' + _PCT_OPTS + '. '
+            'Reply with ONLY the two-letter code: '
         ),
-        'description': 'Leave-home hour (Tue)',
-        'eval_method': 'digit_distribution', 'is_control': False,
+    },
+    # ── E3: Time dimension — coffee ──
+    {
+        'id': 'FG_E3',
+        'type': 'finegrain',
+        'exp': 'exp2',
+        'answer_format': 'pct',
+        'fg_codes': FG_PCT_CODES,
+        'fg_labels': FG_PCT_LABELS,
+        'description': 'P(coffee by 7AM Tue)',
+        'eval_method': 'finegrain_distribution',
+        'is_control': False,
         'strength': 'strong',
-    },
-    {
-        'id': 'E3', 'type': 'numeric', 'exp': 'exp2',
         'prompt': (
-            'Complete with a single number only.\n'
-            'A typical adult arrives home at approximately ___:00 PM '
-            'on a Tuesday.\n'
+            'What is the probability that a typical adult has had '
+            'coffee by 7:00 AM on a Tuesday? '
+            'Pick one: ' + _PCT_OPTS + '. '
+            'Reply with ONLY the two-letter code: '
         ),
-        'description': 'Arrive-home hour (Tue)',
-        'eval_method': 'digit_distribution', 'is_control': False,
+    },
+    # ── E4: Spending dimension — lunch cost ──
+    {
+        'id': 'FG_E4',
+        'type': 'finegrain',
+        'exp': 'exp2',
+        'answer_format': 'pct',
+        'fg_codes': FG_PCT_CODES,
+        'fg_labels': FG_PCT_LABELS,
+        'description': 'P(lunch > $10 on Tue)',
+        'eval_method': 'finegrain_distribution',
+        'is_control': False,
         'strength': 'strong',
-    },
-    {
-        'id': 'E4', 'type': 'numeric', 'exp': 'exp2',
+        # Employed: eat out at work → higher P(>$10)
+        # Unemployed: eat at home → lower P(>$10)
+        # Baseline: Peak=0.50 at 60%, Spread(>0.5%)=7
         'prompt': (
-            'Answer with a single digit from 0 to 9.\n'
-            'How many hours does a typical adult spend at home '
-            'between 8 AM and 6 PM on a Tuesday? ___\n'
+            'What is the probability that a typical adult spends '
+            'more than 10 US dollars on lunch on a Tuesday? '
+            'Pick one: ' + _PCT_OPTS + '. '
+            'Reply with ONLY the two-letter code: '
         ),
-        'description': 'Daytime hours at home (Tue)',
-        'eval_method': 'digit_distribution', 'is_control': False,
+    },
+    # ── E5: Asset dimension — car value ──
+    {
+        'id': 'FG_E5',
+        'type': 'finegrain',
+        'exp': 'exp2',
+        'answer_format': 'dollar',
+        'fg_codes': FG_DOLLAR_CODES,
+        'fg_labels': FG_DOLLAR_LABELS,
+        'description': 'Value of car driven (USD)',
+        'eval_method': 'finegrain_distribution',
+        'is_control': False,
         'strength': 'strong',
-    },
-    {
-        'id': 'E5', 'type': 'numeric', 'exp': 'exp2',
+        # Employed: higher income → more expensive car
+        # Unemployed: lower income → cheaper car
+        # Baseline: Peak=0.54 at $15k, Spread(>0.5%)=4
         'prompt': (
-            'Answer with a single digit from 0 to 9.\n'
-            'What is the longest continuous stretch of hours '
-            'a typical adult spends outside the home on a Tuesday? ___\n'
+            'What is the value of the car that a typical adult '
+            'in the United States drives? '
+            'Pick one: ' + _DOLLAR_OPTS + '. '
+            'Reply with ONLY the two-letter code: '
         ),
-        'description': 'Longest stretch outside (Tue)',
-        'eval_method': 'digit_distribution', 'is_control': False,
+    },
+    # ── E6: Social dimension — work messages ──
+    {
+        'id': 'FG_E6',
+        'type': 'finegrain',
+        'exp': 'exp2',
+        'answer_format': 'count',
+        'fg_codes': FG_COUNT_CODES,
+        'fg_labels': FG_COUNT_LABELS,
+        'description': 'Work messages to coworkers Tue',
+        'eval_method': 'finegrain_distribution',
+        'is_control': False,
         'strength': 'strong',
-    },
-    {
-        'id': 'E6', 'type': 'numeric', 'exp': 'exp2',
+        # Employed: many work messages → higher count
+        # Unemployed: no coworkers → zero or near-zero
+        # Baseline: Peak=0.34 at 10, Spread(>0.5%)=8
         'prompt': (
-            'Answer with a single digit from 0 to 9.\n'
-            'How many total hours is a typical adult away from home '
-            'on a Tuesday? ___\n'
+            'How many texts, emails, or chat messages does a typical '
+            'adult send to coworkers on a Tuesday? '
+            'Pick one: ' + _COUNT_OPTS + '. '
+            'Reply with ONLY the two-letter code: '
         ),
-        'description': 'Total hours away (Tue)',
-        'eval_method': 'digit_distribution', 'is_control': False,
-        'strength': 'strong',
-    },
-    {
-        'id': 'E7', 'type': 'numeric', 'exp': 'exp2',
-        'prompt': (
-            'Answer with a single digit from 0 to 9.\n'
-            'How many hours does a typical adult spend at their '
-            'most frequently visited non-home location on a Tuesday? ___\n'
-        ),
-        'description': 'Hours at primary non-home location (Tue)',
-        'eval_method': 'digit_distribution', 'is_control': False,
-        'strength': 'strong',
-    },
-    {
-        'id': 'E8', 'type': 'numeric', 'exp': 'exp2',
-        'prompt': (
-            'Answer with a single digit from 0 to 9.\n'
-            'How many times does a typical adult return home '
-            'during the daytime (8 AM to 6 PM) on a Tuesday? ___\n'
-        ),
-        'description': 'Daytime home returns (Tue)',
-        'eval_method': 'digit_distribution', 'is_control': False,
-        'strength': 'medium',
-    },
-    {
-        'id': 'E9', 'type': 'numeric', 'exp': 'exp2',
-        'prompt': (
-            'Answer with a single digit from 0 to 9.\n'
-            'How many hours does a typical adult spend commuting '
-            'or in transit on a Tuesday? ___\n'
-        ),
-        'description': 'Commute/transit hours (Tue)',
-        'eval_method': 'digit_distribution', 'is_control': False,
-        'strength': 'medium',
-    },
-    {
-        'id': 'E10', 'type': 'numeric', 'exp': 'exp2',
-        'prompt': (
-            'Answer with a single digit from 0 to 9.\n'
-            'On a scale of 0 to 9, how consistent is a typical '
-            'adult\'s Tuesday schedule from week to week? '
-            '(0 = completely different, 9 = identical every week) ___\n'
-        ),
-        'description': 'Week-to-week consistency (Tue)',
-        'eval_method': 'digit_distribution', 'is_control': False,
-        'strength': 'secondary',
-    },
-
-    # ══════════════════════════════════════
-    # MCQ (10) — all time-anchored behavioral states
-    # ══════════════════════════════════════
-    {
-        'id': 'E11', 'type': 'mcq', 'exp': 'exp2',
-        'prompt': (
-            'At 8:00 AM on a Tuesday, a typical adult is most likely:\n'
-            '(A) Still sleeping or just waking up\n'
-            '(B) Awake at home, starting the day slowly\n'
-            '(C) Already out of the house or about to leave\n'
-            + MCQ_SUFFIX
-        ),
-        'description': '8 AM Tuesday status',
-        'target_option_pos': 'C', 'target_option_neg': 'A', 'target_option_neu': 'B',
-        'eval_method': 'mcq', 'is_control': False,
-        'strength': 'strong',
-    },
-    {
-        'id': 'E12', 'type': 'mcq', 'exp': 'exp2',
-        'prompt': (
-            'A typical adult is asked: "Are you usually free to meet '
-            'for coffee at 10:30 AM on a Tuesday?"\n'
-            'The most likely reply is:\n'
-            '(A) "Yes, I am usually available around that time."\n'
-            '(B) "It depends on the week; sometimes I can, sometimes not."\n'
-            '(C) "No, I am almost always occupied at that hour."\n'
-            + MCQ_SUFFIX
-        ),
-        'description': '10:30 AM coffee availability',
-        'target_option_pos': 'C', 'target_option_neg': 'A', 'target_option_neu': 'B',
-        'eval_method': 'mcq', 'is_control': False,
-        'strength': 'strong',
-    },
-    {
-        'id': 'E13', 'type': 'mcq', 'exp': 'exp2',
-        'prompt': (
-            'A typical adult is asked: "Can you meet me for lunch '
-            'at noon on a Tuesday?"\n'
-            'The most likely reply is:\n'
-            '(A) "Sure, I have no fixed plans around that time."\n'
-            '(B) "I can, but I only have about 30 minutes."\n'
-            '(C) "Sorry, I cannot leave where I am at noon."\n'
-            + MCQ_SUFFIX
-        ),
-        'description': 'Noon Tuesday availability',
-        'target_option_pos': 'C', 'target_option_neg': 'A', 'target_option_neu': 'B',
-        'eval_method': 'mcq', 'is_control': False,
-        'strength': 'strong',
-    },
-    {
-        'id': 'E14', 'type': 'mcq', 'exp': 'exp2',
-        'prompt': (
-            'If you wanted to visit a typical adult at 1 PM '
-            'on a Tuesday, which reply would be most likely?\n'
-            '(A) "I am usually at home around then."\n'
-            '(B) "I am usually at a regular daytime commitment then."\n'
-            '(C) "It varies; I might be in different places."\n'
-            + MCQ_SUFFIX
-        ),
-        'description': '1 PM Tuesday availability',
-        'target_option_pos': 'B', 'target_option_neg': 'A', 'target_option_neu': 'C',
-        'eval_method': 'mcq', 'is_control': False,
-        'strength': 'strong',
-    },
-    {
-        'id': 'E15', 'type': 'mcq', 'exp': 'exp2',
-        'prompt': (
-            'At 3:00 PM on a Tuesday, a typical adult is most likely:\n'
-            '(A) At home\n'
-            '(B) At the same non-home location they have been all day\n'
-            '(C) Moving between different locations\n'
-            + MCQ_SUFFIX
-        ),
-        'description': '3 PM Tuesday location',
-        'target_option_pos': 'B', 'target_option_neg': 'A', 'target_option_neu': 'C',
-        'eval_method': 'mcq', 'is_control': False,
-        'strength': 'strong',
-    },
-    {
-        'id': 'E16', 'type': 'mcq', 'exp': 'exp2',
-        'prompt': (
-            'At 5:00 PM on a Tuesday, a typical adult is most likely:\n'
-            '(A) At home, where they have been most of the day\n'
-            '(B) Heading home from a regular daytime location\n'
-            '(C) Still at a non-home location with no plans to leave yet\n'
-            + MCQ_SUFFIX
-        ),
-        'description': '5 PM Tuesday status',
-        'target_option_pos': 'B', 'target_option_neg': 'A', 'target_option_neu': 'C',
-        'eval_method': 'mcq', 'is_control': False,
-        'strength': 'strong',
-    },
-    {
-        'id': 'E17', 'type': 'mcq', 'exp': 'exp2',
-        'prompt': (
-            'At 7:00 PM on a Tuesday, a typical adult is most likely:\n'
-            '(A) Has been home most of the day\n'
-            '(B) Recently arrived home after being out all day\n'
-            '(C) Still out, not yet headed home\n'
-            + MCQ_SUFFIX
-        ),
-        'description': '7 PM Tuesday status',
-        'target_option_pos': 'B', 'target_option_neg': 'A', 'target_option_neu': 'C',
-        'eval_method': 'mcq', 'is_control': False,
-        'strength': 'medium',
-    },
-    {
-        'id': 'E18', 'type': 'mcq', 'exp': 'exp2',
-        'prompt': (
-            'Does a typical adult use an alarm clock on Tuesday mornings?\n'
-            '(A) No, they wake up naturally whenever they feel like it\n'
-            '(B) Sometimes, depending on whether they have plans\n'
-            '(C) Yes, they set an alarm at the same time every Tuesday\n'
-            + MCQ_SUFFIX
-        ),
-        'description': 'Alarm clock habit (Tue)',
-        'target_option_pos': 'C', 'target_option_neg': 'A', 'target_option_neu': 'B',
-        'eval_method': 'mcq', 'is_control': False,
-        'strength': 'medium',
-    },
-    {
-        'id': 'E19', 'type': 'mcq', 'exp': 'exp2',
-        'prompt': (
-            'Does a typical adult leave home at the same time '
-            'every Tuesday?\n'
-            '(A) No, the departure time varies a lot\n'
-            '(B) Roughly similar, but not exact\n'
-            '(C) Yes, within a few minutes of the same time\n'
-            + MCQ_SUFFIX
-        ),
-        'description': 'Departure time consistency (Tue)',
-        'target_option_pos': 'C', 'target_option_neg': 'A', 'target_option_neu': 'B',
-        'eval_method': 'mcq', 'is_control': False,
-        'strength': 'medium',
-    },
-    {
-        'id': 'E20', 'type': 'mcq', 'exp': 'exp2',
-        'prompt': (
-            'Is a typical adult at the same non-home location '
-            'at noon every Tuesday?\n'
-            '(A) No, they are usually at home at noon\n'
-            '(B) Sometimes the same place, sometimes not\n'
-            '(C) Yes, almost always at the same location\n'
-            + MCQ_SUFFIX
-        ),
-        'description': 'Noon location consistency (Tue)',
-        'target_option_pos': 'C', 'target_option_neg': 'A', 'target_option_neu': 'B',
-        'eval_method': 'mcq', 'is_control': False,
-        'strength': 'medium',
     },
 ]
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Experiment 1a: Weekday vs Weekend
+# Experiment 1a: Weekday vs Weekend  (5 questions)
 # ══════════════════════════════════════════════════════════════════════
-# positive coeff = toward weekday, negative = toward weekend
-# All users in this exp are EMPLOYED.
-# NOTE: prompts intentionally do NOT specify day-of-week.
-# "today" is kept vague so the steering vector can push the model's
-# concept of "today" toward weekday or weekend behavior.
+# No specific day mentioned (intentionally vague).
+# Steering with V_weekday should shift toward weekday behavior.
+# Steering with V_weekend should shift toward weekend behavior.
 
 EXP1A_QUESTIONS = [
-    # ══════════════════════════════════════
-    # NUMERIC (10) — all timing/mobility-grounded
-    # ══════════════════════════════════════
+    # ── W1: Time dimension — wake-up time ──
     {
-        'id': 'W1', 'type': 'numeric', 'exp': 'exp1a',
-        'prompt': (
-            'Complete with a single number only.\n'
-            'An individual wakes up at approximately ___:00 AM today.\n'
-        ),
-        'description': 'Wake-up hour',
-        'eval_method': 'digit_distribution', 'is_control': False,
+        'id': 'FG_W1',
+        'type': 'finegrain',
+        'exp': 'exp1a',
+        'answer_format': 'time',
+        'fg_codes': FG_TIME_CODES,
+        'fg_labels': FG_TIME_LABELS,
+        'description': 'Wake-up time (finegrain)',
+        'eval_method': 'finegrain_distribution',
+        'is_control': False,
         'strength': 'strong',
-    },
-    {
-        'id': 'W2', 'type': 'numeric', 'exp': 'exp1a',
+        # Weekday: earlier (~6:30AM). Weekend: later (~8:30AM).
+        # Baseline: Peak=0.54 at 6:30AM, Spread(>0.5%)=3
         'prompt': (
-            'Complete with a single number only.\n'
-            'An individual leaves home at approximately ___:00 AM today.\n'
+            'At what time does a typical adult wake up in the morning? '
+            'Pick one: ' + _TIME_OPTS + '. '
+            'Reply with ONLY the two-letter code: '
         ),
-        'description': 'Leave-home hour',
-        'eval_method': 'digit_distribution', 'is_control': False,
+    },
+    # ── W4: Food dimension — cooking at home ──
+    {
+        'id': 'FG_W4',
+        'type': 'finegrain',
+        'exp': 'exp1a',
+        'answer_format': 'pct',
+        'fg_codes': FG_PCT_CODES,
+        'fg_labels': FG_PCT_LABELS,
+        'description': 'Pct meals cooked at home today',
+        'eval_method': 'finegrain_distribution',
+        'is_control': False,
         'strength': 'strong',
-    },
-    {
-        'id': 'W3', 'type': 'numeric', 'exp': 'exp1a',
+        # Weekend: more time to cook → higher %
+        # Weekday: grab-and-go / eat out → lower %
+        # Baseline: Peak=0.40 at 80%, Spread(>0.5%)=10
         'prompt': (
-            'Complete with a single number only.\n'
-            'An individual arrives home at approximately ___:00 PM today.\n'
+            'What percentage of meals does a typical adult cook '
+            'at home today? '
+            'Pick one: ' + _PCT_OPTS + '. '
+            'Reply with ONLY the two-letter code: '
         ),
-        'description': 'Arrive-home hour',
-        'eval_method': 'digit_distribution', 'is_control': False,
+    },
+    # ── W5: Leisure dimension — entertainment ──
+    {
+        'id': 'FG_W5',
+        'type': 'finegrain',
+        'exp': 'exp1a',
+        'answer_format': 'pct',
+        'fg_codes': FG_PCT_CODES,
+        'fg_labels': FG_PCT_LABELS,
+        'description': 'Pct free time on entertainment today',
+        'eval_method': 'finegrain_distribution',
+        'is_control': False,
         'strength': 'strong',
-    },
-    {
-        'id': 'W4', 'type': 'numeric', 'exp': 'exp1a',
+        # Weekend: more free time → higher % on entertainment
+        # Weekday: work occupies most time → lower %
+        # Baseline: Peak=0.46 at 50%, Spread(>0.5%)=10
         'prompt': (
-            'Answer with a single digit from 0 to 9.\n'
-            'How many hours does an individual spend at home '
-            'between 8 AM and 6 PM today? ___\n'
+            'What percentage of their free time does a typical adult '
+            'spend on entertainment such as watching TV, playing games, '
+            'or browsing the internet today? '
+            'Pick one: ' + _PCT_OPTS + '. '
+            'Reply with ONLY the two-letter code: '
         ),
-        'description': 'Daytime hours at home',
-        'eval_method': 'digit_distribution', 'is_control': False,
+    },
+    # ── W6: Social dimension — voluntary socializing ──
+    {
+        'id': 'FG_W6',
+        'type': 'finegrain',
+        'exp': 'exp1a',
+        'answer_format': 'hours',
+        'fg_codes': FG_HOURS_CODES,
+        'fg_labels': FG_HOURS_LABELS,
+        'description': 'Hours voluntarily socializing',
+        'eval_method': 'finegrain_distribution',
+        'is_control': False,
         'strength': 'strong',
-    },
-    {
-        'id': 'W5', 'type': 'numeric', 'exp': 'exp1a',
+        # Weekend: more voluntary social time → higher hours
+        # Weekday: work limits social time → lower hours
+        # Baseline: Peak=0.37 at 3.0h, Spread(>0.5%)=6
         'prompt': (
-            'Answer with a single digit from 0 to 9.\n'
-            'What is the longest continuous stretch of hours '
-            'an individual spends outside the home today? ___\n'
+            'How many hours does a typical adult spend voluntarily '
+            'socializing with friends or family? '
+            'Pick one: ' + _HOURS_OPTS + '. '
+            'Reply with ONLY the two-letter code: '
         ),
-        'description': 'Longest stretch outside',
-        'eval_method': 'digit_distribution', 'is_control': False,
+    },
+    # ── W7: Time dimension — breakfast (no day specified) ──
+    {
+        'id': 'FG_W7',
+        'type': 'finegrain',
+        'exp': 'exp1a',
+        'answer_format': 'pct',
+        'fg_codes': FG_PCT_CODES,
+        'fg_labels': FG_PCT_LABELS,
+        'description': 'P(breakfast by 8AM in the morning)',
+        'eval_method': 'finegrain_distribution',
+        'is_control': False,
         'strength': 'strong',
-    },
-    {
-        'id': 'W6', 'type': 'numeric', 'exp': 'exp1a',
+        # Weekday: eat before work → higher P
+        # Weekend: sleep in, brunch → lower P
+        # Baseline: Peak=0.31 at 60%, Spread(>0.5%)=6
         'prompt': (
-            'Answer with a single digit from 0 to 9.\n'
-            'How many total hours is an individual away from home '
-            'today? ___\n'
+            'What is the probability that a typical adult has eaten '
+            'breakfast by 8:00 AM in the morning? '
+            'Pick one: ' + _PCT_OPTS + '. '
+            'Reply with ONLY the two-letter code: '
         ),
-        'description': 'Total hours away',
-        'eval_method': 'digit_distribution', 'is_control': False,
-        'strength': 'strong',
-    },
-    {
-        'id': 'W7', 'type': 'numeric', 'exp': 'exp1a',
-        'prompt': (
-            'Answer with a single digit from 0 to 9.\n'
-            'How many hours does an individual spend at their '
-            'most frequently visited non-home location today? ___\n'
-        ),
-        'description': 'Hours at primary non-home location',
-        'eval_method': 'digit_distribution', 'is_control': False,
-        'strength': 'strong',
-    },
-    {
-        'id': 'W8', 'type': 'numeric', 'exp': 'exp1a',
-        'prompt': (
-            'Answer with a single digit from 0 to 9.\n'
-            'How many times does an individual return home '
-            'during the daytime (8 AM to 6 PM) today? ___\n'
-        ),
-        'description': 'Daytime home returns',
-        'eval_method': 'digit_distribution', 'is_control': False,
-        'strength': 'medium',
-    },
-    {
-        'id': 'W9', 'type': 'numeric', 'exp': 'exp1a',
-        'prompt': (
-            'Answer with a single digit from 0 to 9.\n'
-            'How many hours does an individual spend commuting '
-            'or in transit today? ___\n'
-        ),
-        'description': 'Commute/transit hours',
-        'eval_method': 'digit_distribution', 'is_control': False,
-        'strength': 'medium',
-    },
-    {
-        'id': 'W10', 'type': 'numeric', 'exp': 'exp1a',
-        'prompt': (
-            'Answer with a single digit from 0 to 9.\n'
-            'On a scale of 0 to 9, how consistent is an individual\'s '
-            'schedule today compared to the same day last week? '
-            '(0 = completely different, 9 = identical) ___\n'
-        ),
-        'description': 'Week-to-week consistency',
-        'eval_method': 'digit_distribution', 'is_control': False,
-        'strength': 'secondary',
-    },
-
-    # ══════════════════════════════════════
-    # MCQ (10) — all time-anchored behavioral states
-    # ══════════════════════════════════════
-    {
-        'id': 'W11', 'type': 'mcq', 'exp': 'exp1a',
-        'prompt': (
-            'At 8:00 AM today, an individual is most likely:\n'
-            '(A) Still sleeping or just waking up\n'
-            '(B) Awake at home, starting the day slowly\n'
-            '(C) Already out of the house or about to leave\n'
-            + MCQ_SUFFIX
-        ),
-        'description': '8 AM status',
-        'target_option_pos': 'C', 'target_option_neg': 'A', 'target_option_neu': 'B',
-        'eval_method': 'mcq', 'is_control': False,
-        'strength': 'strong',
-    },
-    {
-        'id': 'W12', 'type': 'mcq', 'exp': 'exp1a',
-        'prompt': (
-            'An individual is asked: "Are you usually free to meet '
-            'for coffee at 10:30 AM today?"\n'
-            'The most likely reply is:\n'
-            '(A) "Yes, I am usually available around that time."\n'
-            '(B) "It depends; sometimes I can, sometimes not."\n'
-            '(C) "No, I am almost always occupied at that hour."\n'
-            + MCQ_SUFFIX
-        ),
-        'description': '10:30 AM coffee availability',
-        'target_option_pos': 'C', 'target_option_neg': 'A', 'target_option_neu': 'B',
-        'eval_method': 'mcq', 'is_control': False,
-        'strength': 'strong',
-    },
-    {
-        'id': 'W13', 'type': 'mcq', 'exp': 'exp1a',
-        'prompt': (
-            'An individual is asked: "Can you meet me for lunch '
-            'at noon today?"\n'
-            'The most likely reply is:\n'
-            '(A) "Sure, I have no fixed plans around that time."\n'
-            '(B) "I can, but I only have about 30 minutes."\n'
-            '(C) "Sorry, I cannot leave where I am at noon."\n'
-            + MCQ_SUFFIX
-        ),
-        'description': 'Noon availability',
-        'target_option_pos': 'C', 'target_option_neg': 'A', 'target_option_neu': 'B',
-        'eval_method': 'mcq', 'is_control': False,
-        'strength': 'strong',
-    },
-    {
-        'id': 'W14', 'type': 'mcq', 'exp': 'exp1a',
-        'prompt': (
-            'At 3:00 PM today, an individual is most likely:\n'
-            '(A) At home\n'
-            '(B) At the same non-home location they have been all day\n'
-            '(C) Moving between different locations\n'
-            + MCQ_SUFFIX
-        ),
-        'description': '3 PM location',
-        'target_option_pos': 'B', 'target_option_neg': 'A', 'target_option_neu': 'C',
-        'eval_method': 'mcq', 'is_control': False,
-        'strength': 'strong',
-    },
-    {
-        'id': 'W15', 'type': 'mcq', 'exp': 'exp1a',
-        'prompt': (
-            'At 5:00 PM today, an individual is most likely:\n'
-            '(A) At home, where they have been most of the day\n'
-            '(B) Heading home from a regular daytime location\n'
-            '(C) Still at a non-home location with no plans to leave yet\n'
-            + MCQ_SUFFIX
-        ),
-        'description': '5 PM status',
-        'target_option_pos': 'B', 'target_option_neg': 'A', 'target_option_neu': 'C',
-        'eval_method': 'mcq', 'is_control': False,
-        'strength': 'strong',
-    },
-    {
-        'id': 'W16', 'type': 'mcq', 'exp': 'exp1a',
-        'prompt': (
-            'At 7:00 PM today, an individual is most likely:\n'
-            '(A) Has been home most of the day\n'
-            '(B) Recently arrived home after being out all day\n'
-            '(C) Still out, not yet headed home\n'
-            + MCQ_SUFFIX
-        ),
-        'description': '7 PM status',
-        'target_option_pos': 'B', 'target_option_neg': 'A', 'target_option_neu': 'C',
-        'eval_method': 'mcq', 'is_control': False,
-        'strength': 'medium',
-    },
-    {
-        'id': 'W17', 'type': 'mcq', 'exp': 'exp1a',
-        'prompt': (
-            'Does an individual use an alarm clock this morning?\n'
-            '(A) No, they wake up naturally\n'
-            '(B) Maybe, depending on plans\n'
-            '(C) Yes, set for a specific early time\n'
-            + MCQ_SUFFIX
-        ),
-        'description': 'Alarm clock usage',
-        'target_option_pos': 'C', 'target_option_neg': 'A', 'target_option_neu': 'B',
-        'eval_method': 'mcq', 'is_control': False,
-        'strength': 'medium',
-    },
-    {
-        'id': 'W18', 'type': 'mcq', 'exp': 'exp1a',
-        'prompt': (
-            'Does an individual leave home at the same time today '
-            'as they did the same day last week?\n'
-            '(A) No, the departure time is very different\n'
-            '(B) Roughly similar, but not exact\n'
-            '(C) Yes, within a few minutes of the same time\n'
-            + MCQ_SUFFIX
-        ),
-        'description': 'Departure time consistency',
-        'target_option_pos': 'C', 'target_option_neg': 'A', 'target_option_neu': 'B',
-        'eval_method': 'mcq', 'is_control': False,
-        'strength': 'medium',
-    },
-    {
-        'id': 'W19', 'type': 'mcq', 'exp': 'exp1a',
-        'prompt': (
-            'Is an individual at the same non-home location '
-            'at noon today as they were at noon last week?\n'
-            '(A) No, they are at home today\n'
-            '(B) They are out, but at a different location\n'
-            '(C) Yes, at the same location\n'
-            + MCQ_SUFFIX
-        ),
-        'description': 'Noon location consistency',
-        'target_option_pos': 'C', 'target_option_neg': 'A', 'target_option_neu': 'B',
-        'eval_method': 'mcq', 'is_control': False,
-        'strength': 'medium',
-    },
-    {
-        'id': 'W20', 'type': 'mcq', 'exp': 'exp1a',
-        'prompt': (
-            'If an individual is asked at 1 PM today: '
-            '"Where are you right now?"\n'
-            'The most likely answer is:\n'
-            '(A) "I am at home."\n'
-            '(B) "I am at a regular place I go to most days."\n'
-            '(C) "I am out, but somewhere different from usual."\n'
-            + MCQ_SUFFIX
-        ),
-        'description': '1 PM location',
-        'target_option_pos': 'B', 'target_option_neg': 'A', 'target_option_neu': 'C',
-        'eval_method': 'mcq', 'is_control': False,
-        'strength': 'strong',
     },
 ]
 
+
+# ══════════════════════════════════════════════════════════════════════
+# Exports
+# ══════════════════════════════════════════════════════════════════════
 
 ALL_QUESTIONS = {
     'exp2': EXP2_QUESTIONS,
     'exp1a': EXP1A_QUESTIONS,
 }
-
-MCQ_TOKENS = ['A', 'B', 'C']
-DIGIT_TOKENS = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']
